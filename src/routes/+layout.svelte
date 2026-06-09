@@ -24,17 +24,29 @@
 		goal: Goal | null;
 	}
 
+	interface SelectedImage {
+		id: string;
+		file: File;
+		name: string;
+	}
+
+	type RenderPart =
+		| { type: 'text'; text: string }
+		| { type: 'image'; path: string; source: 'local' | 'remote' };
+
 	let localCounter = 0;
 
 	let sessions = $state<ThreadSummary[]>([]);
 	let threads = $state<Record<string, ThreadState>>({});
 	let input = $state('');
+	let selectedImages = $state<SelectedImage[]>([]);
 	let connected = $state(false);
 	let loadingHistory = $state(false);
 	let cwds = $state<Record<string, string>>({});
 	let conflict = $state<{ id: string; holders: { pid: number; command: string }[] } | null>(null);
 	let mobileSidebarOpen = $state(false);
 	let mobileViewport = $state(false);
+	let imageInputEl = $state<HTMLInputElement | null>(null);
 
 	// The active session is whatever is in the URL (/s/<id>); / shows the welcome.
 	const activeId = $derived(page.params.id ?? null);
@@ -321,24 +333,33 @@
 
 	async function send() {
 		const text = input.trim();
-		if (!text || !activeId) return;
+		if ((!text && selectedImages.length === 0) || !activeId) return;
 		const id = activeId;
+		const images = selectedImages.map((img) => img.file);
 		input = '';
+		selectedImages = [];
 
 		// Slash commands are handled client-side and dispatched to dedicated RPCs,
 		// mirroring the Codex TUI. Everything else is a normal model turn.
-		if (text.startsWith('/')) {
+		if (text.startsWith('/') && images.length === 0) {
 			await handleSlash(id, text);
 			return;
 		}
 
 		const t = ensureThread(id);
 		t.status = 'running';
-		await fetch(`/api/threads/${id}/message`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ text })
-		});
+		if (images.length > 0) {
+			const body = new FormData();
+			body.set('text', text);
+			for (const image of images) body.append('images', image, image.name);
+			await fetch(`/api/threads/${id}/message`, { method: 'POST', body });
+		} else {
+			await fetch(`/api/threads/${id}/message`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ text })
+			});
+		}
 	}
 
 	function fmtDuration(sec: number): string {
@@ -557,11 +578,61 @@
 		return t.order.map((id) => t.byId[id]).filter(Boolean);
 	}
 
-	function userText(item: any): string {
-		return (item.content ?? [])
-			.map((c: any) => c.text ?? '')
-			.join('')
-			.trim();
+	function imageSrc(path: string): string {
+		if (/^https?:\/\//i.test(path)) return path;
+		return `/api/images?path=${encodeURIComponent(path)}`;
+	}
+
+	function imageLabel(path: string): string {
+		return path.split('/').filter(Boolean).at(-1) ?? path;
+	}
+
+	function userParts(item: any): RenderPart[] {
+		const parts: RenderPart[] = [];
+		for (const c of item.content ?? []) {
+			if (typeof c?.text === 'string' && c.text) parts.push({ type: 'text', text: c.text });
+			if (c?.type === 'localImage' && typeof c.path === 'string') {
+				parts.push({ type: 'image', path: c.path, source: 'local' });
+			}
+			if (c?.type === 'image' && typeof c.url === 'string') {
+				parts.push({ type: 'image', path: c.url, source: 'remote' });
+			}
+		}
+		return parts;
+	}
+
+	function agentParts(text: string): RenderPart[] {
+		const parts: RenderPart[] = [];
+		const re = /<agent-img>\s*([\s\S]*?)\s*<\/agent-img>/g;
+		let last = 0;
+		let match: RegExpExecArray | null;
+		while ((match = re.exec(text))) {
+			if (match.index > last) parts.push({ type: 'text', text: text.slice(last, match.index) });
+			const path = match[1]?.trim();
+			if (path) parts.push({ type: 'image', path, source: /^https?:\/\//i.test(path) ? 'remote' : 'local' });
+			last = re.lastIndex;
+		}
+		if (last < text.length) parts.push({ type: 'text', text: text.slice(last) });
+		return parts;
+	}
+
+	function chooseImages() {
+		imageInputEl?.click();
+	}
+
+	function onImagesSelected(e: Event) {
+		const files = Array.from((e.currentTarget as HTMLInputElement).files ?? []);
+		selectedImages = [
+			...selectedImages,
+			...files
+				.filter((file) => file.type.startsWith('image/'))
+				.map((file) => ({ id: `${file.name}-${file.size}-${file.lastModified}-${Math.random()}`, file, name: file.name }))
+		];
+		if (imageInputEl) imageInputEl.value = '';
+	}
+
+	function removeSelectedImage(id: string) {
+		selectedImages = selectedImages.filter((img) => img.id !== id);
 	}
 
 	function reasoningText(item: any): string {
@@ -762,11 +833,33 @@
 						{#if item.type === 'userMessage'}
 							<div class="item user">
 								<span class="gutter">›</span>
-								<div class="body">{userText(item)}</div>
+								<div class="body media-body">
+									{#each userParts(item) as part}
+										{#if part.type === 'text'}
+											<span>{part.text}</span>
+										{:else}
+											<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
+												<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
+												<span>{imageLabel(part.path)}</span>
+											</a>
+										{/if}
+									{/each}
+								</div>
 							</div>
 						{:else if item.type === 'agentMessage'}
 							<div class="item agent">
-								<div class="body">{(item as any).text}</div>
+								<div class="body media-body">
+									{#each agentParts((item as any).text ?? '') as part}
+										{#if part.type === 'text'}
+											<span>{part.text}</span>
+										{:else}
+											<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
+												<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
+												<span>{imageLabel(part.path)}</span>
+											</a>
+										{/if}
+									{/each}
+								</div>
 							</div>
 						{:else if item.type === 'reasoning'}
 							{#if reasoningText(item)}
@@ -846,14 +939,33 @@
 
 				<div class="composer">
 					<span class="prompt">›</span>
+					<input
+						bind:this={imageInputEl}
+						class="image-input"
+						type="file"
+						accept="image/*"
+						multiple
+						onchange={onImagesSelected}
+					/>
+					<button class="attach" type="button" onclick={chooseImages} title="Attach images">img</button>
 					<textarea
 						placeholder={composerPlaceholder}
 						bind:value={input}
 						onkeydown={onKeydown}
 						rows="1"
 					></textarea>
-					<button class="send" onclick={send} disabled={!input.trim()}>send</button>
+					<button class="send" onclick={send} disabled={!input.trim() && selectedImages.length === 0}>send</button>
 				</div>
+				{#if selectedImages.length > 0}
+					<div class="attachments">
+						{#each selectedImages as image (image.id)}
+							<button class="attachment" type="button" onclick={() => removeSelectedImage(image.id)}>
+								<span>{image.name}</span>
+								<span aria-hidden="true">×</span>
+							</button>
+						{/each}
+					</div>
+				{/if}
 			{/if}
 		{/if}
 	</main>
@@ -1253,6 +1365,35 @@
 	.item.agent .body {
 		color: var(--fg);
 	}
+	.media-body {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		white-space: pre-wrap;
+	}
+	.message-image {
+		width: fit-content;
+		max-width: 100%;
+		color: var(--fg-dim);
+		text-decoration: none;
+		font-size: 11px;
+	}
+	.message-image img {
+		display: block;
+		max-width: min(520px, 100%);
+		max-height: 360px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: #06090d;
+		object-fit: contain;
+	}
+	.message-image span {
+		display: block;
+		margin-top: 4px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
 	.item.reason .body {
 		color: var(--reason);
 		font-style: italic;
@@ -1366,6 +1507,23 @@
 		color: var(--accent);
 		padding-bottom: 8px;
 	}
+	.image-input {
+		display: none;
+	}
+	.attach {
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--fg-dim);
+		border-radius: 6px;
+		padding: 9px 12px;
+		cursor: pointer;
+		font-family: var(--mono);
+		font-size: 12px;
+	}
+	.attach:hover {
+		color: var(--accent);
+		border-color: var(--accent-dim);
+	}
 	textarea {
 		flex: 1;
 		resize: none;
@@ -1398,6 +1556,33 @@
 	.send:disabled {
 		opacity: 0.4;
 		cursor: not-allowed;
+	}
+	.attachments {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		padding: 0 18px 12px 38px;
+		background: var(--bg-alt);
+		border-top: 1px solid transparent;
+	}
+	.attachment {
+		display: inline-flex;
+		align-items: center;
+		max-width: min(260px, 100%);
+		gap: 8px;
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--fg-dim);
+		cursor: pointer;
+		font-family: var(--mono);
+		font-size: 11px;
+		padding: 5px 8px;
+	}
+	.attachment span:first-child {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	@media (max-width: 760px) {
@@ -1596,6 +1781,10 @@
 			max-height: 40dvh;
 		}
 
+		.message-image img {
+			max-height: 42dvh;
+		}
+
 		.composer {
 			align-items: stretch;
 			gap: 7px;
@@ -1613,11 +1802,21 @@
 			font-size: 16px;
 		}
 
+		.attach {
+			min-width: 48px;
+			min-height: 44px;
+			padding: 0 10px;
+		}
+
 		.send {
 			align-self: flex-end;
 			min-width: 64px;
 			min-height: 44px;
 			padding: 0 12px;
+		}
+
+		.attachments {
+			padding: 0 12px calc(10px + env(safe-area-inset-bottom));
 		}
 	}
 
