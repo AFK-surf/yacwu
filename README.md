@@ -57,8 +57,16 @@ Optionally set `YACWU_CWD` to choose the working directory Codex runs in
 
 ```bash
 bun run build:bin    # produces a self-contained ./yacwu executable
-./yacwu              # PORT=3000 by default; honours PORT, HOST, YACWU_CWD
+./yacwu              # listens on 127.0.0.1:3000 by default
+./yacwu 0.0.0.0:8080 # or specify the listening address
+./yacwu --host 0.0.0.0 --port 8080
+./yacwu --unix /run/yacwu.sock
+./yacwu --help
 ```
+
+The binary accepts `-H/--host`, `-p/--port`, a positional `host:port`, or
+`--unix <path>` for a Unix socket (CLI flags override the `HOST`/`PORT` env
+vars). `YACWU_CWD` still selects the working directory for new sessions.
 
 `build:bin` builds with the Bun SvelteKit adapter, embeds the static client
 assets into the executable (`bun build --compile`), and emits a single `yacwu`
