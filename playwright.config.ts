@@ -5,6 +5,8 @@ const baseURL = `http://127.0.0.1:${port}`;
 
 export default defineConfig({
 	testDir: './tests',
+	// e2e specs use *.spec.ts; *.test.ts under tests/unit runs via `bun test`.
+	testMatch: '**/*.spec.ts',
 	timeout: 120_000,
 	expect: { timeout: 60_000 },
 	fullyParallel: false,

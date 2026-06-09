@@ -73,6 +73,22 @@ assets into the executable (`bun build --compile`), and emits a single `yacwu`
 binary — no Node, no `node_modules`, no separate assets. It still needs the
 `codex` CLI on `PATH` at runtime.
 
+## Forward auth
+
+yacwu has no auth of its own; put it behind a reverse proxy that authenticates
+users and injects a `Remote-User` header (Authelia, Traefik forward-auth,
+oauth2-proxy, …). Pass an allowlist to require that header:
+
+```bash
+./yacwu --remote-user alice,bob       # or: YACWU_REMOTE_USERS=alice,bob ./yacwu
+```
+
+When enabled, every request must carry `Remote-User: <user>` matching one of the
+listed users — otherwise it's rejected (`401` if the header is missing, `403` if
+the user isn't allowed). This is enforced for pages, the API, and static assets.
+When unset, auth is disabled. The same `YACWU_REMOTE_USERS` env var enables it
+for `bun run dev` / `bun run start`.
+
 ## Other commands
 
 ```bash

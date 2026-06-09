@@ -12,10 +12,12 @@ const USAGE = `yacwu — minimalist Codex web UI
 Usage: yacwu [options] [address]
 
 Options:
-  -H, --host <host>   listening host (default: 127.0.0.1, or $HOST)
-  -p, --port <port>   listening port (default: 3000, or $PORT)
-      --unix <path>   listen on a Unix domain socket instead of host:port
-  -h, --help          show this help and exit
+  -H, --host <host>      listening host (default: 127.0.0.1, or $HOST)
+  -p, --port <port>      listening port (default: 3000, or $PORT)
+      --unix <path>      listen on a Unix domain socket instead of host:port
+      --remote-user <u>  enable forward auth: require a Remote-User header
+                         matching one of the comma-separated users
+  -h, --help             show this help and exit
 
 Address:
   A positional host:port may be given instead of -H/-p, e.g.
@@ -68,6 +70,9 @@ function parseArgs(argv) {
 			case '--unix':
 				opts.unix = next();
 				break;
+			case '--remote-user':
+				opts.remoteUser = next();
+				break;
 			default:
 				if (a.startsWith('-')) {
 					console.error(`yacwu: unknown option '${a}'\n`);
@@ -86,6 +91,24 @@ if (opts.help) {
 	process.exit(0);
 }
 
+// Forward auth: --remote-user feeds YACWU_REMOTE_USERS, which the SvelteKit hook
+// (src/hooks.server.ts) reads for SSR/API requests. We also enforce it here at
+// the edge so embedded static assets are covered too.
+if (opts.remoteUser !== undefined) process.env.YACWU_REMOTE_USERS = opts.remoteUser;
+const allowedUsers = (process.env.YACWU_REMOTE_USERS ?? '')
+	.split(',')
+	.map((u) => u.trim())
+	.filter(Boolean);
+
+/** @returns {Response|null} a rejection response, or null when allowed. */
+function forwardAuthDenied(req) {
+	if (allowedUsers.length === 0) return null; // auth disabled
+	const user = req.headers.get('remote-user')?.trim();
+	if (!user) return new Response('Missing Remote-User header', { status: 401 });
+	if (!allowedUsers.includes(user)) return new Response('Forbidden', { status: 403 });
+	return null;
+}
+
 const host = opts.host ?? process.env.HOST ?? '127.0.0.1';
 const portRaw = opts.port ?? process.env.PORT ?? '3000';
 const port = Number(portRaw);
@@ -101,6 +124,9 @@ const serve = {
 	...(opts.unix ? { unix: opts.unix } : { hostname: host, port }),
 	...(websocket ? { websocket } : {}),
 	async fetch(req, srv) {
+		const denied = forwardAuthDenied(req);
+		if (denied) return denied;
+
 		const { pathname } = new URL(req.url);
 		const asset = ASSETS.get(pathname);
 		if (asset) {
