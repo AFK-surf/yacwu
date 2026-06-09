@@ -34,10 +34,14 @@
 	let cwds = $state<Record<string, string>>({});
 	let conflict = $state<{ id: string; holders: { pid: number; command: string }[] } | null>(null);
 	let mobileSidebarOpen = $state(false);
+	let mobileViewport = $state(false);
 
 	// The active session is whatever is in the URL (/s/<id>); / shows the welcome.
 	const activeId = $derived(page.params.id ?? null);
 	const active = $derived(activeId ? threads[activeId] : null);
+	const composerPlaceholder = $derived(
+		mobileViewport ? 'message codex' : 'message codex…  (Enter to send, Shift+Enter for newline)'
+	);
 
 	// New-session working-directory picker.
 	let creating = $state(false);
@@ -601,6 +605,11 @@
 	}
 
 	onMount(() => {
+		const mobileQuery = window.matchMedia('(max-width: 760px)');
+		const updateMobileViewport = () => (mobileViewport = mobileQuery.matches);
+		updateMobileViewport();
+		mobileQuery.addEventListener('change', updateMobileViewport);
+
 		loadSessions();
 		const es = new EventSource('/api/events');
 		es.onopen = () => (connected = true);
@@ -617,7 +626,10 @@
 				/* ignore */
 			}
 		};
-		return () => es.close();
+		return () => {
+			es.close();
+			mobileQuery.removeEventListener('change', updateMobileViewport);
+		};
 	});
 </script>
 
@@ -835,7 +847,7 @@
 				<div class="composer">
 					<span class="prompt">›</span>
 					<textarea
-						placeholder="message codex…  (Enter to send, Shift+Enter for newline)"
+						placeholder={composerPlaceholder}
 						bind:value={input}
 						onkeydown={onKeydown}
 						rows="1"
