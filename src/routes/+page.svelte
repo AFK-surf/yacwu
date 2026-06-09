@@ -293,7 +293,7 @@
 			fetch(`/api/threads/${id}/goal`)
 				.then((r) => r.json())
 				.then((g) => {
-					if (g?.goal) ensureThread(id).goal = g.goal as Goal;
+					ensureThread(id).goal = (g?.goal ?? null) as Goal | null;
 				})
 				.catch(() => {});
 		} finally {

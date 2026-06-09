@@ -171,6 +171,73 @@ test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) 
 	await page.locator('button.send').click();
 	await expect(page.locator('.item.note').last()).toContainText('review started');
 	expect(reviewBody).toEqual({ instructions: 'focus on regressions' });
+
+	let shellBody: any = null;
+	await page.route('**/api/threads/*/shell', async (route) => {
+		shellBody = route.request().postDataJSON();
+		await route.fulfill({ json: {} });
+	});
+
+	// /shell forwards the command text to the shell route.
+	await ta.fill('/shell git status --short');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note').last()).toContainText('shell command started');
+	expect(shellBody).toEqual({ command: 'git status --short' });
+
+	let rollbackBody: any = null;
+	await page.route('**/api/threads/*/rollback', async (route) => {
+		rollbackBody = route.request().postDataJSON();
+		await route.fulfill({ json: { thread: { turns: [] } } });
+	});
+
+	// /rollback defaults to one turn and accepts an explicit positive integer.
+	await ta.fill('/rollback');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note').last()).toContainText('rolled back 1 turn');
+	expect(rollbackBody).toEqual({ numTurns: 1 });
+
+	await ta.fill('/rollback 3');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note').last()).toContainText('rolled back 3 turns');
+	expect(rollbackBody).toEqual({ numTurns: 3 });
+
+	// Invalid arguments are rejected before hitting the RPC route.
+	await ta.fill('/rollback nope');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note.err').last()).toContainText('unknown command');
+
+	let forkedId = '';
+	await page.route('**/api/threads/*/fork', async (route) => {
+		forkedId = `thr_fork_${Date.now()}`;
+		await route.fulfill({ json: { thread: { id: forkedId, forkedFromId: 'source' } } });
+	});
+	await page.route('**/api/threads/thr_fork_*/open', async (route) => {
+		await route.fulfill({ json: { thread: { id: forkedId, turns: [] } } });
+	});
+	await page.route('**/api/threads/thr_fork_*/goal', async (route) => {
+		await route.fulfill({ json: { goal: null } });
+	});
+
+	// /fork creates and selects the returned session.
+	await ta.fill('/fork');
+	await page.locator('button.send').click();
+	await expect(page.locator(`.session[data-id="${forkedId}"]`)).toHaveClass(/active/, {
+		timeout: 15_000
+	});
+
+	let archiveCalls = 0;
+	await page.route('**/api/threads/thr_fork_*/archive', async (route) => {
+		archiveCalls += 1;
+		await route.fulfill({ json: {} });
+	});
+
+	// /archive removes the active session from the list.
+	await page.locator('.composer textarea').fill('/archive');
+	await page.locator('button.send').click();
+	await expect(page.locator(`.session[data-id="${forkedId}"]`)).toHaveCount(0, {
+		timeout: 15_000
+	});
+	expect(archiveCalls).toBe(1);
 });
 
 test('slash command: /status reports account, limits & session info', async ({ page }) => {

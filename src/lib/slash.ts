@@ -35,9 +35,13 @@ function parseGoal(arg: string): SlashCommand {
 
 	const budgetMatch = arg.match(/^--budget\s+(\d+)\s+(.+)$/i);
 	if (budgetMatch) {
+		const tokenBudget = Number(budgetMatch[1]);
+		if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1) {
+			return { kind: 'unknown', command: '/goal' };
+		}
 		return {
 			kind: 'goal-set',
-			tokenBudget: Number(budgetMatch[1]),
+			tokenBudget,
 			objective: budgetMatch[2].trim()
 		};
 	}
@@ -54,13 +58,13 @@ export function parseSlash(text: string): SlashCommand {
 	switch (cmd) {
 		case '/?':
 		case '/help':
-			return { kind: 'help' };
+			return arg ? { kind: 'unknown', command: cmd } : { kind: 'help' };
 		case '/status':
-			return { kind: 'status' };
+			return arg ? { kind: 'unknown', command: cmd } : { kind: 'status' };
 		case '/goal':
 			return parseGoal(arg);
 		case '/compact':
-			return { kind: 'compact' };
+			return arg ? { kind: 'unknown', command: cmd } : { kind: 'compact' };
 		case '/review':
 			return arg ? { kind: 'review', instructions: arg } : { kind: 'review' };
 		case '/shell':
@@ -73,9 +77,9 @@ export function parseSlash(text: string): SlashCommand {
 			return { kind: 'unknown', command: cmd };
 		}
 		case '/fork':
-			return { kind: 'fork' };
+			return arg ? { kind: 'unknown', command: cmd } : { kind: 'fork' };
 		case '/archive':
-			return { kind: 'archive' };
+			return arg ? { kind: 'unknown', command: cmd } : { kind: 'archive' };
 		default:
 			return { kind: 'unknown', command: cmd };
 	}

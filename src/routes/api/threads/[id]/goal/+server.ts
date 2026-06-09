@@ -31,7 +31,13 @@ export const POST: RequestHandler = async ({ params, request }) => {
 	}
 
 	const setParams: Record<string, unknown> = { threadId, objective, status: 'active' };
-	if (typeof body.tokenBudget === 'number') setParams.tokenBudget = body.tokenBudget;
+	if (body.tokenBudget !== undefined) {
+		const tokenBudget = Number(body.tokenBudget);
+		if (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1) {
+			return json({ error: 'tokenBudget must be a positive integer' }, { status: 400 });
+		}
+		setParams.tokenBudget = tokenBudget;
+	}
 
 	const result = await codex.request('thread/goal/set', setParams);
 	return json(result);
