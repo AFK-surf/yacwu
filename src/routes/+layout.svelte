@@ -1190,6 +1190,11 @@
 	.item.reason .gutter {
 		color: var(--reason);
 	}
+	.item.cmd {
+		flex-direction: column;
+		gap: 2px;
+		align-items: stretch;
+	}
 	.cmd-line {
 		display: flex;
 		gap: 8px;
