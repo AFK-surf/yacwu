@@ -12,6 +12,7 @@
 		status: string;
 		tokenBudget: number | null;
 		tokensUsed: number;
+		timeUsedSeconds: number;
 	}
 
 	interface ThreadState {
@@ -381,6 +382,17 @@
 		if (mins % 1440 === 0) return `${mins / 1440}d`;
 		if (mins % 60 === 0) return `${mins / 60}h`;
 		return `${mins}m`;
+	}
+
+	function fmtTokens(tokens: number): string {
+		if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}m`;
+		if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k`;
+		return tokens.toLocaleString();
+	}
+
+	function goalBudgetPercent(goal: Goal): number {
+		if (!goal.tokenBudget) return 0;
+		return Math.min(100, Math.round((goal.tokensUsed / goal.tokenBudget) * 100));
 	}
 
 	async function buildStatus(id: string): Promise<string> {
@@ -838,6 +850,30 @@
 					{/if}
 				</div>
 			</div>
+
+			{#if active?.goal}
+				<div class="goal-tracker" aria-label="active goal">
+					<div class="goal-main">
+						<span class="goal-marker">◎</span>
+						<span class="goal-objective" title={active.goal.objective}>{active.goal.objective}</span>
+						<span class="goal-state">{active.goal.status}</span>
+					</div>
+					<div class="goal-metrics">
+						{#if active.goal.tokenBudget}
+							<div class="goal-progress" aria-label={`${goalBudgetPercent(active.goal)}% of token budget used`}>
+								<span style={`width: ${goalBudgetPercent(active.goal)}%`}></span>
+							</div>
+							<span
+								>{fmtTokens(active.goal.tokensUsed)} / {fmtTokens(active.goal.tokenBudget)}
+								tok</span
+							>
+						{:else}
+							<span>{fmtTokens(active.goal.tokensUsed)} tok</span>
+						{/if}
+						<span>{fmtDuration(active.goal.timeUsedSeconds ?? 0)}</span>
+					</div>
+				</div>
+			{/if}
 
 			{#if conflict && conflict.id === activeId}
 				<div class="conflict">
@@ -1355,6 +1391,60 @@
 		color: var(--fg-dim);
 		margin-left: 6px;
 	}
+	.goal-tracker {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 16px;
+		padding: 10px 18px;
+		border-bottom: 1px solid var(--border);
+		background: rgba(65, 184, 131, 0.07);
+		font-size: 12px;
+	}
+	.goal-main {
+		display: flex;
+		align-items: center;
+		gap: 9px;
+		min-width: 0;
+	}
+	.goal-marker,
+	.goal-state {
+		flex: 0 0 auto;
+		color: var(--accent);
+	}
+	.goal-objective {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--fg);
+	}
+	.goal-state {
+		border: 1px solid rgba(65, 184, 131, 0.35);
+		border-radius: 5px;
+		padding: 2px 6px;
+		font-size: 11px;
+	}
+	.goal-metrics {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		flex: 0 0 auto;
+		color: var(--fg-dim);
+		white-space: nowrap;
+	}
+	.goal-progress {
+		width: 120px;
+		height: 5px;
+		overflow: hidden;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.08);
+	}
+	.goal-progress span {
+		display: block;
+		height: 100%;
+		background: var(--accent);
+	}
 	.spacer {
 		flex: 1;
 	}
@@ -1791,6 +1881,22 @@
 			order: 2;
 			flex: 1 0 100%;
 			max-width: 100%;
+		}
+
+		.goal-tracker {
+			align-items: flex-start;
+			flex-direction: column;
+			gap: 8px;
+			padding: 9px 12px;
+		}
+
+		.goal-main,
+		.goal-metrics {
+			width: 100%;
+		}
+
+		.goal-metrics {
+			flex-wrap: wrap;
 		}
 
 		.spacer {

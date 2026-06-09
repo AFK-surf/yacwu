@@ -131,6 +131,8 @@ test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) 
 	await expect(page.locator('.topbar .goal')).toContainText('Finish the slash router', {
 		timeout: 15_000
 	});
+	await expect(page.locator('.goal-tracker')).toContainText('Finish the slash router');
+	await expect(page.locator('.goal-tracker')).toContainText('active');
 	await expect(page.locator('.item.note').last()).toContainText('goal set');
 
 	// /goal with no arguments reads and displays the current goal.
@@ -145,6 +147,7 @@ test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) 
 	await ta.fill('/goal clear');
 	await page.locator('button.send').click();
 	await expect(page.locator('.topbar .goal')).toHaveCount(0, { timeout: 15_000 });
+	await expect(page.locator('.goal-tracker')).toHaveCount(0);
 	await expect(page.locator('.item.note').last()).toContainText('goal cleared');
 
 	let compactCalls = 0;
