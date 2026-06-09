@@ -717,13 +717,15 @@
 					</span>
 				{/if}
 				<span class="spacer"></span>
-				{#if active?.tokens}<span class="meta">{active.tokens.toLocaleString()} tok</span>{/if}
-				{#if active?.status === 'running'}
-					<span class="status running">● running</span>
-					<button class="stop" onclick={interrupt}>stop</button>
-				{:else}
-					<span class="status">● idle</span>
-				{/if}
+				<div class="session-state">
+					{#if active?.tokens}<span class="meta tokens">{active.tokens.toLocaleString()} tok</span>{/if}
+					{#if active?.status === 'running'}
+						<span class="status running">● running</span>
+						<button class="stop" onclick={interrupt}>stop</button>
+					{:else}
+						<span class="status">● idle</span>
+					{/if}
+				</div>
 			</div>
 
 			{#if conflict && conflict.id === activeId}
@@ -1177,6 +1179,11 @@
 	.spacer {
 		flex: 1;
 	}
+	.session-state {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+	}
 	.status {
 		color: var(--fg-dim);
 	}
@@ -1528,6 +1535,12 @@
 
 		.spacer {
 			display: none;
+		}
+
+		.session-state {
+			order: 3;
+			flex: 1 0 100%;
+			gap: 10px;
 		}
 
 		.status {
