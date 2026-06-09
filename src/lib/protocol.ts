@@ -57,7 +57,7 @@ export interface FileChangeItem {
 	type: 'fileChange';
 	id: string;
 	status: string;
-	changes: Array<{ path: string; kind: string; diff?: string }>;
+	changes: Array<{ path: string; kind: unknown; diff?: string }>;
 }
 
 export interface PlanItem {

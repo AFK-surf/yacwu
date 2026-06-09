@@ -33,6 +33,7 @@
 	let loadingHistory = $state(false);
 	let cwds = $state<Record<string, string>>({});
 	let conflict = $state<{ id: string; holders: { pid: number; command: string }[] } | null>(null);
+	let mobileSidebarOpen = $state(false);
 
 	// The active session is whatever is in the URL (/s/<id>); / shows the welcome.
 	const activeId = $derived(page.params.id ?? null);
@@ -255,6 +256,7 @@
 			ensureThread(id);
 			upsertSession(data.thread);
 			goto(`/s/${id}`);
+			mobileSidebarOpen = false;
 		}
 	}
 
@@ -572,6 +574,32 @@
 		return s.id.slice(0, 8);
 	}
 
+	function fileChangeKind(ch: any): string {
+		const kind = ch?.kind;
+		if (typeof kind === 'string' && kind.trim()) return kind;
+		if (kind && typeof kind === 'object') {
+			const label = kind.type ?? kind.kind ?? kind.action ?? kind.operation;
+			if (typeof label === 'string' && label.trim()) return label;
+			const keys = Object.keys(kind);
+			if (keys.length === 1) return keys[0];
+		}
+		return 'changed';
+	}
+
+	function fileChangeClass(ch: any): string {
+		return fileChangeKind(ch)
+			.toLowerCase()
+			.replace(/[^a-z0-9_-]+/g, '-')
+			.replace(/^-|-$/g, '') || 'changed';
+	}
+
+	function fileChangePath(ch: any): string {
+		const path = ch?.path;
+		if (typeof path === 'string') return path;
+		if (path && typeof path === 'object' && typeof path.path === 'string') return path.path;
+		return String(path ?? '');
+	}
+
 	onMount(() => {
 		loadSessions();
 		const es = new EventSource('/api/events');
@@ -597,8 +625,22 @@
 	<link rel="preconnect" href="https://fonts.googleapis.com" />
 </svelte:head>
 
-<div class="app">
-	<aside class="sidebar">
+<div class={mobileSidebarOpen ? 'app sidebar-open' : 'app'}>
+	<button
+		class="sidebar-toggle"
+		aria-label={mobileSidebarOpen ? 'close sessions' : 'open sessions'}
+		aria-expanded={mobileSidebarOpen}
+		onclick={() => (mobileSidebarOpen = !mobileSidebarOpen)}
+	>
+		{mobileSidebarOpen ? '×' : '☰'}
+	</button>
+	<button
+		class="sidebar-scrim"
+		aria-label="close sessions"
+		onclick={() => (mobileSidebarOpen = false)}
+	></button>
+
+	<aside class="sidebar" class:open={mobileSidebarOpen}>
 		<div class="brand">
 			<span class="prompt">$</span> yacwu
 			<span class="dot" class:on={connected} title={connected ? 'connected' : 'disconnected'}></span>
@@ -635,6 +677,7 @@
 					class:active={s.id === activeId}
 					data-id={s.id}
 					href={`/s/${s.id}`}
+					onclick={() => (mobileSidebarOpen = false)}
 				>
 					<span class="run-dot" class:running={threads[s.id]?.status === 'running'}></span>
 					<span class="label">{shortLabel(s)}</span>
@@ -734,7 +777,10 @@
 								<span class="gutter">±</span>
 								<div class="body">
 									{#each (item as any).changes ?? [] as ch}
-										<div class="fc"><span class="kind {ch.kind}">{ch.kind}</span> {ch.path}</div>
+										<div class="fc">
+											<span class="kind {fileChangeClass(ch)}">{fileChangeKind(ch)}</span>
+											{fileChangePath(ch)}
+										</div>
 									{/each}
 								</div>
 							</div>
@@ -849,7 +895,13 @@
 		display: grid;
 		grid-template-columns: 260px 1fr;
 		height: 100vh;
+		height: 100dvh;
 		width: 100vw;
+	}
+
+	.sidebar-toggle,
+	.sidebar-scrim {
+		display: none;
 	}
 
 	.sidebar {
@@ -1327,6 +1379,231 @@
 	.send:disabled {
 		opacity: 0.4;
 		cursor: not-allowed;
+	}
+
+	@media (max-width: 760px) {
+		:global(html, body) {
+			font-size: 12px;
+		}
+
+		.app {
+			grid-template-columns: 1fr;
+			overflow: hidden;
+		}
+
+		.sidebar-toggle {
+			position: fixed;
+			top: calc(8px + env(safe-area-inset-top));
+			left: 8px;
+			z-index: 40;
+			display: grid;
+			place-items: center;
+			width: 38px;
+			height: 38px;
+			background: var(--panel);
+			border: 1px solid var(--border);
+			border-radius: 6px;
+			color: var(--fg);
+			cursor: pointer;
+			font-family: var(--mono);
+			font-size: 20px;
+			line-height: 1;
+		}
+
+		.sidebar-scrim {
+			position: fixed;
+			inset: 0;
+			z-index: 20;
+			display: block;
+			background: rgba(0, 0, 0, 0.45);
+			border: 0;
+			padding: 0;
+			opacity: 0;
+			pointer-events: none;
+			transition: opacity 160ms ease;
+		}
+
+		.app.sidebar-open .sidebar-scrim {
+			opacity: 1;
+			pointer-events: auto;
+		}
+
+		.sidebar {
+			position: fixed;
+			top: 0;
+			bottom: 0;
+			left: 0;
+			z-index: 30;
+			width: min(82vw, 300px);
+			min-height: 100vh;
+			min-height: 100dvh;
+			padding-top: env(safe-area-inset-top);
+			transform: translateX(-100%);
+			transition: transform 180ms ease;
+			box-shadow: 16px 0 40px rgba(0, 0, 0, 0.35);
+		}
+
+		.sidebar.open {
+			transform: translateX(0);
+		}
+
+		.brand {
+			min-height: 54px;
+			padding-left: 54px;
+		}
+
+		.new {
+			min-height: 42px;
+			padding: 8px 12px;
+		}
+
+		.create {
+			margin: 10px;
+		}
+
+		.create-actions {
+			flex-wrap: wrap;
+		}
+
+		.create-hint {
+			margin-left: 0;
+		}
+
+		.sessions {
+			overflow-y: auto;
+			padding-bottom: 10px;
+		}
+
+		.session {
+			min-height: 48px;
+			padding: 8px 10px;
+		}
+
+		.empty {
+			padding: 12px 10px;
+		}
+
+		.hint {
+			display: none;
+		}
+
+		.chat {
+			width: 100vw;
+		}
+
+		.welcome {
+			width: 100%;
+			margin: auto 0;
+			padding: 72px 12px 24px;
+			overflow: auto;
+		}
+
+		.welcome pre {
+			max-width: 100%;
+			overflow-x: auto;
+			font-size: 10px;
+			text-align: left;
+		}
+
+		.topbar {
+			flex-wrap: wrap;
+			gap: 6px 10px;
+			min-height: 54px;
+			padding: calc(8px + env(safe-area-inset-top)) 12px 8px 54px;
+		}
+
+		.topbar .meta {
+			min-width: 0;
+			max-width: 100%;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		.goal {
+			order: 2;
+			flex: 1 0 100%;
+			max-width: 100%;
+		}
+
+		.spacer {
+			display: none;
+		}
+
+		.status {
+			margin-left: auto;
+		}
+
+		.stop {
+			min-height: 34px;
+			padding: 6px 10px;
+		}
+
+		.conflict {
+			margin: 12px;
+		}
+
+		.transcript {
+			padding: 12px;
+			gap: 12px;
+		}
+
+		.item {
+			gap: 7px;
+		}
+
+		.gutter {
+			width: 10px;
+		}
+
+		.cmd-line {
+			flex-wrap: wrap;
+			gap: 4px 8px;
+		}
+
+		.cmd-status {
+			margin-left: 18px;
+		}
+
+		.cmd-out {
+			margin-left: 0;
+			font-size: 11px;
+			max-height: 40dvh;
+		}
+
+		.composer {
+			align-items: stretch;
+			gap: 7px;
+			padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+		}
+
+		.composer .prompt {
+			display: none;
+		}
+
+		textarea {
+			min-width: 0;
+			min-height: 44px;
+			max-height: 35dvh;
+			font-size: 16px;
+		}
+
+		.send {
+			align-self: flex-end;
+			min-width: 64px;
+			min-height: 44px;
+			padding: 0 12px;
+		}
+	}
+
+	@media (max-width: 420px) {
+		.topbar {
+			font-size: 11px;
+		}
+
+		.transcript {
+			padding: 10px;
+		}
 	}
 
 	@keyframes blink {
