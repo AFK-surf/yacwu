@@ -1,7 +1,7 @@
 // Builds the single-file `yacwu` executable.
 //
-// Run via `bun run build:bin`, which first produces the Bun-adapter SvelteKit
-// build (YACWU_BINARY=1 vite build) and then invokes this script. We walk the
+// Run via `bun run build:bin`, which first produces the SvelteKit build (`vite
+// build`, using svelte-adapter-bun) and then invokes this script. We walk the
 // generated client assets, emit a module that embeds each one into the binary
 // (`import ... with { type: 'file' }`), and compile binary-entry.js with
 // `bun build --compile`.
@@ -13,7 +13,7 @@ const root = import.meta.dir; // scripts/
 const buildDir = join(root, '..', 'build');
 
 if (!existsSync(join(buildDir, 'handler.js'))) {
-	console.error('build/ not found — run `YACWU_BINARY=1 vite build` first.');
+	console.error('build/ not found — run `vite build` first.');
 	process.exit(1);
 }
 

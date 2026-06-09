@@ -69,8 +69,8 @@ binary — no Node, no `node_modules`, no separate assets. It still needs the
 
 ```bash
 bun run check        # svelte-check / TypeScript
-bun run build        # production build (adapter-node)
-bun run start        # run the built server (node build)
+bun run build        # production build (svelte-adapter-bun)
+bun run start        # run the built server (bun ./build/index.js)
 bunx playwright test # end-to-end verification (drives the live app)
 ```
 

@@ -7,13 +7,12 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "start": "node build",
-    "build:bin": "YACWU_BINARY=1 vite build && bun scripts/build-binary.ts",
+    "start": "bun ./build/index.js",
+    "build:bin": "vite build && bun scripts/build-binary.ts",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
-    "@sveltejs/adapter-node": "^5.2.12",
     "@sveltejs/kit": "^2.20.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@types/node": "^25.9.2",
