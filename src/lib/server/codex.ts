@@ -132,6 +132,11 @@ class CodexManager {
 		this.write({ method, params });
 	}
 
+	/** PID of the managed `codex app-server` process (null if not running). */
+	get pid(): number | null {
+		return this.proc?.pid ?? null;
+	}
+
 	/** Subscribe to all codex notifications. Returns an unsubscribe function. */
 	subscribe(listener: NotificationListener): () => void {
 		this.emitter.on('notification', listener);

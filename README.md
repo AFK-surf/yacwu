@@ -11,7 +11,9 @@ state lives entirely in Codex's own persistent sessions, read back via
 ## Features
 
 - 🖥️ Minimalist CLI/terminal aesthetic, dark background
-- 🧵 Multi-session: list, create, switch, and resume Codex threads
+- 🧵 Multi-session: list, create (in a chosen working directory), switch, and resume Codex threads
+- 🔒 In-use detection: warns before opening a session another codex instance
+  already has loaded (so two processes don't corrupt one conversation)
 - ⚡ Live streaming of agent messages, reasoning, command runs, file changes & plans
 - 🔌 Single `codex app-server` process multiplexed over one connection; events
   fan out to the browser via Server-Sent Events
@@ -56,6 +58,18 @@ browser ──HTTP/SSE──> SvelteKit (Bun)
   (`/api/threads`, `/api/threads/[id]/open|message|interrupt`, `/api/events`).
 - `src/routes/+page.svelte` — the terminal-style UI; routes streamed events to
   the right session by `threadId`.
+- `src/lib/server/sessionLock.ts` — detects whether another codex process has a
+  session's rollout file open before we resume it.
 
 Threads run with `approvalPolicy: "never"` and a `workspace-write` sandbox so the
 web UI never blocks on an interactive approval prompt.
+
+### In-use detection
+
+codex keeps an open file descriptor on a session's rollout `.jsonl` for as long
+as the thread is loaded (resumed) — even while idle. Before resuming, the open
+endpoint scans `/proc/*/fd` for any process (outside our own app-server's process
+tree) holding that path; if one exists it returns `409` and the UI shows a
+warning with the offending process so you can cancel or "open anyway". This is
+Linux-only; on platforms without `/proc` it degrades to no detection rather than
+blocking.

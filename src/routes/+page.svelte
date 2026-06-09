@@ -23,6 +23,7 @@
 	let connected = $state(false);
 	let loadingHistory = $state(false);
 	let cwds = $state<Record<string, string>>({});
+	let conflict = $state<{ id: string; holders: { pid: number; command: string }[] } | null>(null);
 
 	// New-session working-directory picker.
 	let creating = $state(false);
@@ -219,16 +220,30 @@
 
 	async function selectSession(id: string) {
 		activeId = id;
+		conflict = null;
 		const t = ensureThread(id);
 		// Already loaded history? skip refetch.
 		if (t.order.length > 0) {
 			scrollToBottom();
 			return;
 		}
+		await openSession(id, false);
+	}
+
+	async function openSession(id: string, force: boolean) {
 		loadingHistory = true;
 		try {
-			const res = await fetch(`/api/threads/${id}/open`, { method: 'POST' });
+			const res = await fetch(`/api/threads/${id}/open`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ force })
+			});
 			const data = await res.json();
+			if (res.status === 409 && data.conflict) {
+				conflict = { id, holders: data.holders ?? [] };
+				return;
+			}
+			conflict = null;
 			const thr = data.thread;
 			if (thr?.cwd) cwds[id] = thr.cwd;
 			const turns: Turn[] = thr?.turns ?? [];
@@ -241,6 +256,15 @@
 			loadingHistory = false;
 			scrollToBottom();
 		}
+	}
+
+	function forceOpen() {
+		if (conflict) openSession(conflict.id, true);
+	}
+
+	function dismissConflict() {
+		conflict = null;
+		activeId = null;
 	}
 
 	async function send() {
@@ -367,6 +391,7 @@
 				<button
 					class="session"
 					class:active={s.id === activeId}
+					data-id={s.id}
 					onclick={() => selectSession(s.id)}
 				>
 					<span class="run-dot" class:running={threads[s.id]?.status === 'running'}></span>
@@ -406,7 +431,21 @@
 				{/if}
 			</div>
 
-			<div class="transcript" bind:this={transcriptEl}>
+			{#if conflict && conflict.id === activeId}
+				<div class="conflict">
+					<div class="conflict-head">⚠ session in use by another codex instance</div>
+					<div class="conflict-body">
+						This conversation's rollout is open in
+						{#each conflict.holders as h, i}{i > 0 ? ', ' : ' '}<code>{h.command} (pid {h.pid})</code>{/each}.
+						Opening it here too can corrupt its history.
+					</div>
+					<div class="conflict-actions">
+						<button class="mini danger" onclick={forceOpen}>open anyway</button>
+						<button class="mini ghost" onclick={dismissConflict}>cancel</button>
+					</div>
+				</div>
+			{:else}
+				<div class="transcript" bind:this={transcriptEl}>
 				{#if loadingHistory}
 					<div class="sys">loading history…</div>
 				{/if}
@@ -482,7 +521,8 @@
 					rows="1"
 				></textarea>
 				<button class="send" onclick={send} disabled={!input.trim()}>send</button>
-			</div>
+				</div>
+			{/if}
 		{/if}
 	</main>
 </div>
@@ -599,6 +639,38 @@
 		border: 1px solid var(--border);
 		color: var(--fg-dim);
 		font-weight: 400;
+	}
+	.mini.danger {
+		background: transparent;
+		border: 1px solid var(--err);
+		color: var(--err);
+	}
+	.conflict {
+		margin: 14px 18px 0;
+		padding: 12px 14px;
+		border: 1px solid var(--err);
+		border-radius: 6px;
+		background: rgba(248, 81, 73, 0.08);
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.conflict-head {
+		color: var(--err);
+		font-weight: 600;
+	}
+	.conflict-body {
+		color: var(--fg);
+		font-size: 12px;
+		line-height: 1.5;
+	}
+	.conflict-body code {
+		color: var(--cmd);
+		word-break: break-all;
+	}
+	.conflict-actions {
+		display: flex;
+		gap: 8px;
 	}
 	.create-hint {
 		margin-left: auto;
