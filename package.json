@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "start": "node build",
+    "build:bin": "YACWU_BINARY=1 vite build && bun scripts/build-binary.ts",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
   },
   "devDependencies": {
@@ -17,6 +18,7 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "@types/node": "^25.9.2",
     "svelte": "^5.20.0",
+    "svelte-adapter-bun": "^1.0.1",
     "svelte-check": "^4.6.0",
     "typescript": "^6.0.3",
     "vite": "^6.2.0"

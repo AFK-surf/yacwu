@@ -8,3 +8,7 @@ node_modules
 bun.lock
 test-results
 playwright-report
+
+# single-binary build artifacts
+/yacwu
+scripts/.gen-assets.js

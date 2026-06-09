@@ -53,6 +53,18 @@ bun run dev          # http://127.0.0.1:5173
 Optionally set `YACWU_CWD` to choose the working directory Codex runs in
 (defaults to your home directory).
 
+## Single-binary distribution
+
+```bash
+bun run build:bin    # produces a self-contained ./yacwu executable
+./yacwu              # PORT=3000 by default; honours PORT, HOST, YACWU_CWD
+```
+
+`build:bin` builds with the Bun SvelteKit adapter, embeds the static client
+assets into the executable (`bun build --compile`), and emits a single `yacwu`
+binary — no Node, no `node_modules`, no separate assets. It still needs the
+`codex` CLI on `PATH` at runtime.
+
 ## Other commands
 
 ```bash
