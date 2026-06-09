@@ -4,7 +4,6 @@ import { extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { codex } from '$lib/server/codex';
-import { IMAGE_OUTPUT_INSTRUCTIONS } from '$lib/server/defaults';
 import type { RequestHandler } from './$types';
 
 function imageExtension(file: File): string {
@@ -59,10 +58,7 @@ export const POST: RequestHandler = async ({ params, request }) => {
 
 	const result = await codex.request('turn/start', {
 		threadId: params.id,
-		input,
-		settings: {
-			developer_instructions: IMAGE_OUTPUT_INSTRUCTIONS
-		}
+		input
 	});
 	return json(result);
 };
