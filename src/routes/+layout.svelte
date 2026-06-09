@@ -128,16 +128,19 @@
 
 	/** Append a client-side note (slash-command echo / help / errors). */
 	function addLocalNote(id: string, text: string, tone: 'info' | 'err' = 'info') {
+		const shouldScroll = id === activeId && isTranscriptAtBottom();
 		const t = ensureThread(id);
 		const noteId = `local-${++localCounter}`;
 		t.order.push(noteId);
 		t.byId[noteId] = { type: 'localNote', id: noteId, text, tone } as any;
-		scrollToBottom();
+		if (shouldScroll) scrollToBottom();
 	}
 
 	function handleNotification(msg: JsonRpcNotification) {
 		const p: any = msg.params ?? {};
 		const tid: string | undefined = p.threadId;
+		const affectedThreadId: string | undefined = tid ?? p.thread?.id;
+		const shouldScroll = affectedThreadId === activeId && isTranscriptAtBottom();
 
 		switch (msg.method) {
 			case 'thread/started': {
@@ -227,7 +230,13 @@
 			}
 		}
 
-		scrollToBottom();
+		if (shouldScroll) scrollToBottom();
+	}
+
+	function isTranscriptAtBottom(): boolean {
+		if (!transcriptEl) return true;
+		const remaining = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
+		return remaining <= 24;
 	}
 
 	async function scrollToBottom() {

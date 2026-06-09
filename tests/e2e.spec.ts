@@ -273,6 +273,34 @@ test('slash command: /status reports account, limits & session info', async ({ p
 	await expect(note).toContainText('7d limit  7% used');
 });
 
+test('new transcript output preserves scroll when not at the bottom', async ({ page }) => {
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await expect(page.locator('.composer')).toBeVisible();
+
+	const ta = page.locator('.composer textarea');
+	for (let i = 0; i < 30; i += 1) {
+		await ta.fill(`/bogus-${i}`);
+		await page.locator('button.send').click();
+		await expect(page.locator('.item.note.err').last()).toContainText('unknown command');
+	}
+
+	const transcript = page.locator('.transcript');
+	await transcript.evaluate((el) => {
+		el.scrollTop = 0;
+	});
+	const before = await transcript.evaluate((el) => el.scrollTop);
+
+	await ta.fill('/bogus-no-scroll');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note.err').last()).toContainText('unknown command');
+
+	const after = await transcript.evaluate((el) => el.scrollTop);
+	expect(after).toBe(before);
+});
+
 test('warns when a session is in use by another codex instance', async ({ page, request }) => {
 	// Pick an existing stored session and have a separate codex instance open it.
 	const list = await (await request.get('/api/threads')).json();
