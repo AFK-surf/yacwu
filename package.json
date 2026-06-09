@@ -1,0 +1,24 @@
+{
+  "name": "yacwu",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node build",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@sveltejs/adapter-node": "^5.2.12",
+    "@sveltejs/kit": "^2.20.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@types/node": "^25.9.2",
+    "svelte": "^5.20.0",
+    "svelte-check": "^4.6.0",
+    "typescript": "^6.0.3",
+    "vite": "^6.2.0"
+  }
+}
