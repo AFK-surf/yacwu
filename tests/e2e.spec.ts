@@ -18,8 +18,9 @@ test('multi-session: create two, stream a reply, switch between them', async ({ 
 
 	const sessionsBefore = await page.locator('.session').count();
 
-	// Session A.
+	// Session A (default working directory via the picker).
 	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
 	await expect(page.locator('.composer')).toBeVisible();
 	await expect(page.locator('.session')).toHaveCount(sessionsBefore + 1);
 
@@ -42,6 +43,7 @@ test('multi-session: create two, stream a reply, switch between them', async ({ 
 
 	// Session B — independent, should start empty.
 	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
 	await expect(page.locator('.session')).toHaveCount(sessionsBefore + 2);
 	await expect(page.locator('.item.agent')).toHaveCount(0);
 
@@ -52,4 +54,29 @@ test('multi-session: create two, stream a reply, switch between them', async ({ 
 	});
 
 	await page.screenshot({ path: 'tests/yacwu.png', fullPage: true });
+});
+
+test('new session can target a specific working directory', async ({ page }) => {
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+
+	// Open the picker and create a session rooted at /tmp.
+	await page.locator('button.new').click();
+	await expect(page.locator('.cwd-input')).toBeVisible();
+	await page.locator('.cwd-input').fill('/tmp');
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
+
+	// Composer opens and the topbar reflects the chosen cwd.
+	await expect(page.locator('.composer')).toBeVisible();
+	await expect(page.locator('.topbar .meta').first()).toContainText('/tmp', {
+		timeout: 15_000
+	});
+
+	// A bad directory surfaces an error instead of creating a session.
+	await page.locator('button.new').click();
+	await page.locator('.cwd-input').fill('/no/such/dir/xyz');
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await expect(page.locator('.create-err')).toContainText('does not exist', {
+		timeout: 15_000
+	});
 });

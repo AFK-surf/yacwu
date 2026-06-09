@@ -24,6 +24,13 @@
 	let loadingHistory = $state(false);
 	let cwds = $state<Record<string, string>>({});
 
+	// New-session working-directory picker.
+	let creating = $state(false);
+	let createError = $state<string | null>(null);
+	let newCwd = $state('');
+	let defaultCwd = $state('');
+	let cwdInputEl = $state<HTMLInputElement | null>(null);
+
 	let transcriptEl = $state<HTMLDivElement | null>(null);
 
 	const active = $derived(activeId ? threads[activeId] : null);
@@ -160,15 +167,35 @@
 		const res = await fetch('/api/threads');
 		const data = await res.json();
 		sessions = data.data ?? [];
+		defaultCwd = data.defaultCwd ?? '';
 	}
 
-	async function newSession() {
+	async function startCreating() {
+		createError = null;
+		newCwd = '';
+		creating = true;
+		await tick();
+		cwdInputEl?.focus();
+	}
+
+	function cancelCreating() {
+		creating = false;
+		createError = null;
+	}
+
+	async function newSession(cwd?: string) {
+		createError = null;
 		const res = await fetch('/api/threads', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({})
+			body: JSON.stringify(cwd ? { cwd } : {})
 		});
 		const data = await res.json();
+		if (!res.ok) {
+			createError = data.error ?? 'failed to create session';
+			return;
+		}
+		creating = false;
 		const id = data.thread?.id;
 		if (id) {
 			ensureThread(id);
@@ -247,6 +274,16 @@
 		}
 	}
 
+	function onCwdKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			newSession(newCwd.trim() || undefined);
+		} else if (e.key === 'Escape') {
+			e.preventDefault();
+			cancelCreating();
+		}
+	}
+
 	function itemsOf(t: ThreadState | null): ThreadItem[] {
 		if (!t) return [];
 		return t.order.map((id) => t.byId[id]).filter(Boolean);
@@ -300,7 +337,31 @@
 			<span class="prompt">$</span> yacwu
 			<span class="dot" class:on={connected} title={connected ? 'connected' : 'disconnected'}></span>
 		</div>
-		<button class="new" onclick={newSession}>+ new session</button>
+		{#if creating}
+			<div class="create">
+				<div class="create-row">
+					<span class="prompt">cd</span>
+					<input
+						class="cwd-input"
+						bind:this={cwdInputEl}
+						bind:value={newCwd}
+						onkeydown={onCwdKeydown}
+						placeholder={defaultCwd || 'working directory'}
+						spellcheck="false"
+						autocapitalize="off"
+						autocomplete="off"
+					/>
+				</div>
+				<div class="create-actions">
+					<button class="mini" onclick={() => newSession(newCwd.trim() || undefined)}>start</button>
+					<button class="mini ghost" onclick={cancelCreating}>esc</button>
+					<span class="create-hint">blank = default</span>
+				</div>
+				{#if createError}<div class="create-err">{createError}</div>{/if}
+			</div>
+		{:else}
+			<button class="new" onclick={startCreating}>+ new session</button>
+		{/if}
 		<div class="sessions">
 			{#each sessions as s (s.id)}
 				<button
@@ -329,7 +390,7 @@
  \\__, |\\__,_|\\___|  \\_/\\_/  \\__,_|
  |___/      yet another codex web ui
 `}</pre>
-				<p>Select a session on the left, or start a <button class="inline" onclick={newSession}>new one</button>.</p>
+				<p>Select a session on the left, or start a <button class="inline" onclick={startCreating}>new one</button>.</p>
 			</div>
 		{:else}
 			<div class="topbar">
@@ -478,6 +539,77 @@
 	.new:hover {
 		color: var(--accent);
 		border-color: var(--accent-dim);
+	}
+	.create {
+		margin: 10px;
+		padding: 8px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: var(--panel);
+		display: flex;
+		flex-direction: column;
+		gap: 7px;
+	}
+	.create-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.create-row .prompt {
+		color: var(--accent);
+		font-size: 12px;
+	}
+	.cwd-input {
+		flex: 1;
+		min-width: 0;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		color: var(--fg);
+		font-family: var(--mono);
+		font-size: 12px;
+		padding: 5px 7px;
+	}
+	.cwd-input:focus {
+		outline: none;
+		border-color: var(--accent-dim);
+	}
+	.cwd-input::placeholder {
+		color: var(--fg-dim);
+		opacity: 0.6;
+	}
+	.create-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+	}
+	.mini {
+		background: var(--accent-dim);
+		border: none;
+		color: #02110a;
+		font-weight: 600;
+		border-radius: 4px;
+		padding: 4px 10px;
+		cursor: pointer;
+		font-family: var(--mono);
+		font-size: 11px;
+	}
+	.mini.ghost {
+		background: transparent;
+		border: 1px solid var(--border);
+		color: var(--fg-dim);
+		font-weight: 400;
+	}
+	.create-hint {
+		margin-left: auto;
+		color: var(--fg-dim);
+		font-size: 10px;
+		opacity: 0.7;
+	}
+	.create-err {
+		color: var(--err);
+		font-size: 11px;
+		word-break: break-word;
 	}
 	.sessions {
 		flex: 1;
