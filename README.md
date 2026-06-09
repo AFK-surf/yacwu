@@ -115,8 +115,9 @@ browser ──HTTP/SSE──> SvelteKit (Bun)
 - `src/lib/server/sessionLock.ts` — detects whether another codex process has a
   session's rollout file open before we resume it.
 
-Threads run with `approvalPolicy: "never"` and a `workspace-write` sandbox so the
-web UI never blocks on an interactive approval prompt.
+Threads run in "yolo" mode — `approvalPolicy: "never"` and
+`sandbox: "danger-full-access"` — so the web UI never blocks on an interactive
+approval prompt and commands run with full access.
 
 ### In-use detection
 
