@@ -41,6 +41,10 @@ test('multi-session: create two, stream a reply, switch between them', async ({ 
 	await page.goto('/');
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
 
+	// The session list loads asynchronously; the sidebar footer renders the
+	// count, so wait for it before capturing the baseline (avoids a mid-load race).
+	await expect(page.locator('.hint')).toContainText('session', { timeout: 15_000 });
+	await page.waitForTimeout(500);
 	const sessionsBefore = await page.locator('.session').count();
 
 	// Session A (default working directory via the picker).
@@ -104,6 +108,99 @@ test('new session can target a specific working directory', async ({ page }) => 
 	await expect(page.locator('.create-err')).toContainText('does not exist', {
 		timeout: 15_000
 	});
+});
+
+test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) => {
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await expect(page.locator('.composer')).toBeVisible();
+
+	const ta = page.locator('.composer textarea');
+
+	// Unknown command is rejected client-side (no model turn).
+	await ta.fill('/bogus');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note.err').last()).toContainText('unknown command');
+
+	// /goal sets a goal -> header shows it, a note confirms.
+	await ta.fill('/goal Finish the slash router');
+	await page.locator('button.send').click();
+	await expect(page.locator('.topbar .goal')).toContainText('Finish the slash router', {
+		timeout: 15_000
+	});
+	await expect(page.locator('.item.note').last()).toContainText('goal set');
+
+	// /goal with no arguments reads and displays the current goal.
+	await ta.fill('/goal');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note').last()).toContainText(
+		'goal: Finish the slash router',
+		{ timeout: 15_000 }
+	);
+
+	// /goal clear removes it.
+	await ta.fill('/goal clear');
+	await page.locator('button.send').click();
+	await expect(page.locator('.topbar .goal')).toHaveCount(0, { timeout: 15_000 });
+	await expect(page.locator('.item.note').last()).toContainText('goal cleared');
+
+	let compactCalls = 0;
+	await page.route('**/api/threads/*/compact', async (route) => {
+		compactCalls += 1;
+		await route.fulfill({ json: {} });
+	});
+
+	let reviewBody: any = null;
+	await page.route('**/api/threads/*/review', async (route) => {
+		reviewBody = route.request().postDataJSON();
+		await route.fulfill({ json: { reviewThreadId: 'thr_test' } });
+	});
+
+	// /compact dispatches to the dedicated RPC route and marks the thread active.
+	await ta.fill('/compact');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note').last()).toContainText('compacting history');
+	await expect(page.locator('.topbar .status')).toContainText('running');
+	expect(compactCalls).toBe(1);
+
+	// /review forwards optional instructions to the review route.
+	await ta.fill('/review focus on regressions');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note').last()).toContainText('review started');
+	expect(reviewBody).toEqual({ instructions: 'focus on regressions' });
+});
+
+test('slash command: /status reports account, limits & session info', async ({ page }) => {
+	// Deterministic account/limit data.
+	await page.route('**/api/account', async (route) => {
+		await route.fulfill({
+			json: {
+				account: { type: 'chatgpt', email: 'dev@example.com', planType: 'pro' },
+				rateLimits: {
+					primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 9999999999 },
+					secondary: { usedPercent: 7, windowDurationMins: 10080, resetsAt: 9999999999 },
+					credits: { unlimited: false, balance: '0' }
+				}
+			}
+		});
+	});
+
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await expect(page.locator('.composer')).toBeVisible();
+
+	await page.locator('.composer textarea').fill('/status');
+	await page.locator('button.send').click();
+
+	const note = page.locator('.item.note .body').last();
+	await expect(note).toContainText('account   dev@example.com · pro', { timeout: 15_000 });
+	await expect(note).toContainText('5h limit  42% used');
+	await expect(note).toContainText('7d limit  7% used');
 });
 
 test('warns when a session is in use by another codex instance', async ({ page, request }) => {

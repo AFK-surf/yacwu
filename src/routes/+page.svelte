@@ -6,6 +6,14 @@
 		ThreadSummary,
 		Turn
 	} from '$lib/protocol';
+	import { parseSlash, SLASH_HELP } from '$lib/slash';
+
+	interface Goal {
+		objective: string;
+		status: string;
+		tokenBudget: number | null;
+		tokensUsed: number;
+	}
 
 	interface ThreadState {
 		order: string[];
@@ -14,7 +22,10 @@
 		turnId: string | null;
 		tokens: number | null;
 		error: string | null;
+		goal: Goal | null;
 	}
+
+	let localCounter = 0;
 
 	let sessions = $state<ThreadSummary[]>([]);
 	let activeId = $state<string | null>(null);
@@ -44,7 +55,8 @@
 				status: 'idle',
 				turnId: null,
 				tokens: null,
-				error: null
+				error: null,
+				goal: null
 			};
 		}
 		return threads[id];
@@ -64,6 +76,48 @@
 		t.byId[item.id] = next;
 	}
 
+	function replaceItems(id: string, turns: Turn[]) {
+		const t = ensureThread(id);
+		t.order = [];
+		t.byId = {};
+		for (const turn of turns) {
+			for (const item of turn.items ?? []) {
+				if ((item as any).id) upsertItem(id, item as any);
+			}
+		}
+	}
+
+	function upsertSession(thr: any) {
+		if (!thr?.id) return;
+		if (thr.cwd) cwds[thr.id] = thr.cwd;
+		const now = Date.now();
+		const summary: ThreadSummary = {
+			id: thr.id,
+			preview: thr.preview ?? '',
+			name: thr.name ?? null,
+			createdAt: thr.createdAt ?? now,
+			updatedAt: thr.updatedAt ?? thr.createdAt ?? now,
+			cwd: thr.cwd
+		};
+		sessions = [summary, ...sessions.filter((s) => s.id !== thr.id)];
+	}
+
+	function removeSession(id: string) {
+		sessions = sessions.filter((s) => s.id !== id);
+		delete threads[id];
+		delete cwds[id];
+		if (activeId === id) activeId = null;
+	}
+
+	/** Append a client-side note (slash-command echo / help / errors). */
+	function addLocalNote(id: string, text: string, tone: 'info' | 'err' = 'info') {
+		const t = ensureThread(id);
+		const noteId = `local-${++localCounter}`;
+		t.order.push(noteId);
+		t.byId[noteId] = { type: 'localNote', id: noteId, text, tone } as any;
+		scrollToBottom();
+	}
+
 	function handleNotification(msg: JsonRpcNotification) {
 		const p: any = msg.params ?? {};
 		const tid: string | undefined = p.threadId;
@@ -73,20 +127,12 @@
 				const thr = p.thread;
 				if (thr?.id) {
 					ensureThread(thr.id);
-					if (!sessions.find((s) => s.id === thr.id)) {
-						sessions = [
-							{
-								id: thr.id,
-								preview: thr.preview ?? '',
-								name: thr.name ?? null,
-								createdAt: thr.createdAt ?? 0,
-								updatedAt: thr.updatedAt ?? 0,
-								cwd: thr.cwd
-							},
-							...sessions
-						];
-					}
+					upsertSession(thr);
 				}
+				break;
+			}
+			case 'thread/archived': {
+				if (tid) removeSession(tid);
 				break;
 			}
 			case 'turn/started': {
@@ -145,6 +191,14 @@
 				}
 				break;
 			}
+			case 'thread/goal/updated': {
+				if (tid && p.goal) ensureThread(tid).goal = p.goal as Goal;
+				break;
+			}
+			case 'thread/goal/cleared': {
+				if (tid) ensureThread(tid).goal = null;
+				break;
+			}
 			case 'turn/error':
 			case 'error': {
 				if (tid) {
@@ -200,20 +254,7 @@
 		const id = data.thread?.id;
 		if (id) {
 			ensureThread(id);
-			if (data.thread.cwd) cwds[id] = data.thread.cwd;
-			if (!sessions.find((s) => s.id === id)) {
-				sessions = [
-					{
-						id,
-						preview: '',
-						name: null,
-						createdAt: data.thread.createdAt ?? 0,
-						updatedAt: data.thread.updatedAt ?? 0,
-						cwd: data.thread.cwd
-					},
-					...sessions
-				];
-			}
+			upsertSession(data.thread);
 			activeId = id;
 		}
 	}
@@ -247,11 +288,14 @@
 			const thr = data.thread;
 			if (thr?.cwd) cwds[id] = thr.cwd;
 			const turns: Turn[] = thr?.turns ?? [];
-			for (const turn of turns) {
-				for (const item of turn.items ?? []) {
-					if ((item as any).id) upsertItem(id, item as any);
-				}
-			}
+			replaceItems(id, turns);
+			// Surface any persisted goal for this session.
+			fetch(`/api/threads/${id}/goal`)
+				.then((r) => r.json())
+				.then((g) => {
+					if (g?.goal) ensureThread(id).goal = g.goal as Goal;
+				})
+				.catch(() => {});
 		} finally {
 			loadingHistory = false;
 			scrollToBottom();
@@ -272,6 +316,14 @@
 		if (!text || !activeId) return;
 		const id = activeId;
 		input = '';
+
+		// Slash commands are handled client-side and dispatched to dedicated RPCs,
+		// mirroring the Codex TUI. Everything else is a normal model turn.
+		if (text.startsWith('/')) {
+			await handleSlash(id, text);
+			return;
+		}
+
 		const t = ensureThread(id);
 		t.status = 'running';
 		await fetch(`/api/threads/${id}/message`, {
@@ -279,6 +331,188 @@
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({ text })
 		});
+	}
+
+	function fmtDuration(sec: number): string {
+		const d = Math.floor(sec / 86400);
+		const h = Math.floor((sec % 86400) / 3600);
+		const m = Math.floor((sec % 3600) / 60);
+		if (d) return `${d}d ${h}h`;
+		if (h) return `${h}h ${m}m`;
+		if (m) return `${m}m`;
+		return `${Math.max(0, sec)}s`;
+	}
+
+	function fmtReset(resetsAt: number): string {
+		const diff = resetsAt - Math.floor(Date.now() / 1000);
+		return diff <= 0 ? 'now' : fmtDuration(diff);
+	}
+
+	function windowLabel(mins: number): string {
+		if (mins % 1440 === 0) return `${mins / 1440}d`;
+		if (mins % 60 === 0) return `${mins / 60}h`;
+		return `${mins}m`;
+	}
+
+	async function buildStatus(id: string): Promise<string> {
+		const t = threads[id];
+		const sess = sessions.find((s) => s.id === id);
+		const lines = ['status'];
+		lines.push(`  session   ${id}`);
+		const cwd = cwds[id] ?? sess?.cwd;
+		if (cwd) lines.push(`  cwd       ${cwd}`);
+		lines.push(`  state     ${t?.status ?? 'idle'}`);
+		if (t?.tokens) lines.push(`  tokens    ${t.tokens.toLocaleString()}`);
+		if (t?.goal) lines.push(`  goal      ${t.goal.objective} (${t.goal.status})`);
+		try {
+			const acc = await (await fetch('/api/account')).json();
+			const a = acc.account;
+			if (a) lines.push(`  account   ${a.email ?? a.type}${a.planType ? ` · ${a.planType}` : ''}`);
+			for (const win of [acc.rateLimits?.primary, acc.rateLimits?.secondary]) {
+				if (win) {
+					const label = `${windowLabel(win.windowDurationMins)} limit`.padEnd(9);
+					lines.push(`  ${label} ${win.usedPercent}% used · resets in ${fmtReset(win.resetsAt)}`);
+				}
+			}
+			const credits = acc.rateLimits?.credits;
+			if (credits && !credits.unlimited) lines.push(`  credits   ${credits.balance ?? '0'}`);
+		} catch {
+			lines.push('  (account info unavailable)');
+		}
+		return lines.join('\n');
+	}
+
+	async function postCmd(id: string, path: string, body: unknown): Promise<any> {
+		const res = await fetch(`/api/threads/${id}/${path}`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(body ?? {})
+		});
+		return { ok: res.ok, data: await res.json().catch(() => ({})) };
+	}
+
+	async function handleSlash(id: string, text: string) {
+		const parsed = parseSlash(text);
+		addLocalNote(id, text);
+
+		switch (parsed.kind) {
+			case 'help':
+				addLocalNote(id, SLASH_HELP);
+				break;
+
+			case 'status':
+				addLocalNote(id, await buildStatus(id));
+				break;
+
+			case 'goal-show': {
+				let g = threads[id]?.goal;
+				try {
+					const res = await fetch(`/api/threads/${id}/goal`);
+					const data = await res.json();
+					if (res.ok) {
+						g = (data.goal ?? null) as Goal | null;
+						ensureThread(id).goal = g;
+					}
+				} catch {
+					/* use locally cached goal */
+				}
+				addLocalNote(id, g ? `goal: ${g.objective} (${g.status})` : 'no goal set');
+				break;
+			}
+
+			case 'goal-clear': {
+				const { ok, data } = await postCmd(id, 'goal', { clear: true });
+				if (ok) ensureThread(id).goal = null;
+				addLocalNote(id, ok ? 'goal cleared' : data.error ?? 'failed to clear goal', ok ? 'info' : 'err');
+				break;
+			}
+
+			case 'goal-set': {
+				const body =
+					parsed.tokenBudget === undefined
+						? { objective: parsed.objective }
+						: { objective: parsed.objective, tokenBudget: parsed.tokenBudget };
+				const { ok, data } = await postCmd(id, 'goal', body);
+				if (ok && data.goal) ensureThread(id).goal = data.goal as Goal;
+				addLocalNote(
+					id,
+					ok ? `goal set: ${parsed.objective}` : data.error ?? 'failed to set goal',
+					ok ? 'info' : 'err'
+				);
+				break;
+			}
+
+			case 'compact': {
+				const t = ensureThread(id);
+				t.status = 'running';
+				const { ok, data } = await postCmd(id, 'compact', {});
+				if (!ok) t.status = 'idle';
+				addLocalNote(id, ok ? 'compacting history…' : data.error ?? 'failed to compact', ok ? 'info' : 'err');
+				break;
+			}
+
+			case 'review': {
+				const t = ensureThread(id);
+				t.status = 'running';
+				const { ok, data } = await postCmd(
+					id,
+					'review',
+					parsed.instructions ? { instructions: parsed.instructions } : {}
+				);
+				if (!ok) {
+					t.status = 'idle';
+					addLocalNote(id, data.error ?? 'failed to start review', 'err');
+				} else {
+					addLocalNote(id, 'review started');
+				}
+				break;
+			}
+
+			case 'shell': {
+				const t = ensureThread(id);
+				t.status = 'running';
+				const { ok, data } = await postCmd(id, 'shell', { command: parsed.command });
+				if (!ok) t.status = 'idle';
+				addLocalNote(id, ok ? 'shell command started' : data.error ?? 'failed to start shell command', ok ? 'info' : 'err');
+				break;
+			}
+
+			case 'rollback': {
+				const { ok, data } = await postCmd(id, 'rollback', { numTurns: parsed.numTurns });
+				if (ok) {
+					replaceItems(id, data.thread?.turns ?? []);
+					addLocalNote(id, `rolled back ${parsed.numTurns} turn${parsed.numTurns === 1 ? '' : 's'}`);
+				} else {
+					addLocalNote(id, data.error ?? 'failed to roll back', 'err');
+				}
+				break;
+			}
+
+			case 'fork': {
+				const { ok, data } = await postCmd(id, 'fork', {});
+				if (ok && data.thread?.id) {
+					const thread = data.thread;
+					upsertSession(thread);
+					ensureThread(thread.id);
+					activeId = thread.id;
+					addLocalNote(thread.id, `forked from ${id.slice(0, 8)}`);
+					await openSession(thread.id, false);
+				} else {
+					addLocalNote(id, data.error ?? 'failed to fork session', 'err');
+				}
+				break;
+			}
+
+			case 'archive': {
+				const { ok, data } = await postCmd(id, 'archive', {});
+				if (ok) removeSession(id);
+				else addLocalNote(id, data.error ?? 'failed to archive session', 'err');
+				break;
+			}
+
+			default:
+				addLocalNote(id, `unknown command: ${parsed.command} — try /help`, 'err');
+		}
 	}
 
 	async function interrupt() {
@@ -421,6 +655,16 @@
 			<div class="topbar">
 				<span class="tid">{activeId.slice(0, 8)}</span>
 				{#if cwds[activeId]}<span class="meta">{cwds[activeId]}</span>{/if}
+				{#if active?.goal}
+					<span class="goal" title={active.goal.objective}>
+						◎ {active.goal.objective}{#if active.goal.tokenBudget}
+							<span class="goal-budget"
+								>{Math.round(active.goal.tokensUsed / 1000)}k/{Math.round(
+									active.goal.tokenBudget / 1000
+								)}k</span
+							>{/if}
+					</span>
+				{/if}
 				<span class="spacer"></span>
 				{#if active?.tokens}<span class="meta">{active.tokens.toLocaleString()} tok</span>{/if}
 				{#if active?.status === 'running'}
@@ -496,6 +740,26 @@
 									{/each}
 								{:else}{(item as any).text}{/if}
 							</div>
+						</div>
+					{:else if item.type === 'localNote'}
+						<div class="item note {(item as any).tone}">
+							<span class="gutter">/</span>
+							<div class="body">{(item as any).text}</div>
+						</div>
+					{:else if item.type === 'enteredReviewMode'}
+						<div class="item note">
+							<span class="gutter">⚑</span>
+							<div class="body">review started: {(item as any).review}</div>
+						</div>
+					{:else if item.type === 'exitedReviewMode'}
+						<div class="item review">
+							<span class="gutter">⚑</span>
+							<div class="body">{(item as any).review}</div>
+						</div>
+					{:else if item.type === 'contextCompaction'}
+						<div class="item note">
+							<span class="gutter">⤳</span>
+							<div class="body">history compacted</div>
 						</div>
 					{:else}
 						<div class="item generic">
@@ -793,6 +1057,17 @@
 	.topbar .meta {
 		color: var(--fg-dim);
 	}
+	.goal {
+		color: var(--accent);
+		max-width: 40%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.goal-budget {
+		color: var(--fg-dim);
+		margin-left: 6px;
+	}
 	.spacer {
 		flex: 1;
 	}
@@ -922,6 +1197,27 @@
 	.item.generic .body {
 		color: var(--fg-dim);
 		font-size: 11px;
+	}
+	.item.note .gutter,
+	.item.note .body {
+		color: var(--fg-dim);
+	}
+	.item.note .body {
+		font-style: italic;
+		white-space: pre-wrap;
+	}
+	.item.note.err .gutter,
+	.item.note.err .body {
+		color: var(--err);
+		font-style: normal;
+	}
+	.item.review .gutter {
+		color: var(--accent);
+	}
+	.item.review .body {
+		color: var(--fg);
+		border-left: 2px solid var(--accent-dim);
+		padding-left: 10px;
 	}
 	.blink {
 		animation: blink 1s step-start infinite;

@@ -1,5 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const port = Number(process.env.YACWU_PORT ?? 5173);
+const baseURL = `http://127.0.0.1:${port}`;
+
 export default defineConfig({
 	testDir: './tests',
 	timeout: 120_000,
@@ -8,14 +11,14 @@ export default defineConfig({
 	workers: 1,
 	reporter: [['list']],
 	use: {
-		baseURL: 'http://127.0.0.1:5173',
+		baseURL,
 		trace: 'off',
 		screenshot: 'only-on-failure'
 	},
 	projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 	webServer: {
-		command: 'bun run dev',
-		url: 'http://127.0.0.1:5173',
+		command: `bun run dev --port ${port}`,
+		url: baseURL,
 		reuseExistingServer: true,
 		timeout: 60_000
 	}

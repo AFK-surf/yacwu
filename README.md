@@ -15,9 +15,27 @@ state lives entirely in Codex's own persistent sessions, read back via
 - 🔒 In-use detection: warns before opening a session another codex instance
   already has loaded (so two processes don't corrupt one conversation)
 - ⚡ Live streaming of agent messages, reasoning, command runs, file changes & plans
+- ⌨️ Slash commands mirroring the Codex TUI (see below)
 - 🔌 Single `codex app-server` process multiplexed over one connection; events
   fan out to the browser via Server-Sent Events
 - 🗄️ No storage layer — Codex is the source of truth
+
+## Slash commands
+
+Type these in the composer (anything not starting with `/` is a normal model turn):
+
+| command | action |
+| --- | --- |
+| `/status` | show account, rate limits & session info |
+| `/goal <objective>` | set the thread goal (`--budget N` to add a token budget) |
+| `/goal` / `/goal clear` | show / clear the current goal |
+| `/compact` | compact conversation history |
+| `/review [notes]` | review uncommitted changes (or run a custom review) |
+| `/shell <command>` | run a user-initiated shell command in the thread |
+| `/rollback [turns]` | roll back the last N turns (default 1) |
+| `/fork` | branch this thread into a new session |
+| `/archive` | archive this session |
+| `/help` | list the commands |
 
 ## Requirements
 
