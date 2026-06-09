@@ -298,3 +298,26 @@ test('warns when a session is in use by another codex instance', async ({ page, 
 		proc.kill('SIGTERM');
 	}
 });
+
+test('session id is reflected in the URL and the sidebar uses links', async ({ page }) => {
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await expect(page).toHaveURL(/\/$/); // welcome at the root
+
+	// Creating a session navigates to /s/<id>.
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await expect(page.locator('.composer')).toBeVisible();
+	await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/);
+	const id = page.url().split('/s/')[1];
+
+	// Sidebar entries are real links pointing at /s/<id>.
+	const link = page.locator(`.session[data-id="${id}"]`);
+	await expect(link).toHaveAttribute('href', `/s/${id}`);
+	expect(await link.evaluate((el) => el.tagName)).toBe('A');
+
+	// Deep-linking: a full reload to /s/<id> restores the session view.
+	await page.goto(`/s/${id}`);
+	await expect(page.locator('.composer')).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator('.topbar .tid')).toHaveText(id.slice(0, 8));
+});

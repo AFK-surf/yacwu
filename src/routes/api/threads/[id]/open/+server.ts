@@ -19,11 +19,15 @@ export const POST: RequestHandler = async ({ params, request }) => {
 	const body = await request.json().catch(() => ({}));
 	const force = body?.force === true;
 
-	// thread/read returns the rollout path WITHOUT loading the thread into memory.
-	const read = await codex.request<{ thread?: { path?: string } }>('thread/read', {
-		threadId,
-		includeTurns: true
-	});
+	// thread/read returns the rollout path + history WITHOUT loading the thread.
+	// A brand-new thread isn't materialized until its first user message, so
+	// thread/read can fail — treat that as "no history yet" rather than an error.
+	let read: { thread?: { path?: string; turns?: unknown[] } } | null = null;
+	try {
+		read = await codex.request('thread/read', { threadId, includeTurns: true });
+	} catch {
+		read = null;
+	}
 	const rolloutPath = read?.thread?.path ?? '';
 
 	if (!force) {
@@ -34,5 +38,5 @@ export const POST: RequestHandler = async ({ params, request }) => {
 	}
 
 	await codex.request('thread/resume', { threadId, ...THREAD_DEFAULTS });
-	return json(read);
+	return json(read ?? { thread: { id: threadId, turns: [] } });
 };
