@@ -10,5 +10,6 @@ export const IMAGE_OUTPUT_INSTRUCTIONS =
 
 export const THREAD_DEFAULTS: Record<string, unknown> = {
 	approvalPolicy: 'never',
-	sandbox: 'danger-full-access'
+	sandbox: 'danger-full-access',
+	developerInstructions: IMAGE_OUTPUT_INSTRUCTIONS
 };
