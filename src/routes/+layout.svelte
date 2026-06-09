@@ -556,6 +556,24 @@
 		});
 	}
 
+	async function deleteSession(id: string) {
+		const session = sessions.find((s) => s.id === id);
+		const label = session ? shortLabel(session) : id.slice(0, 8);
+		if (!confirm(`Delete session "${label}"?`)) return;
+		const res = await fetch(`/api/threads/${id}/archive`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({})
+		});
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			alert(data.error ?? 'failed to delete session');
+			return;
+		}
+		removeSession(id);
+		if (activeId === id) goto('/');
+	}
+
 	function onKeydown(e: KeyboardEvent) {
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
@@ -755,17 +773,27 @@
 		{/if}
 		<nav class="sessions">
 			{#each sessions as s (s.id)}
-				<a
-					class="session"
-					class:active={s.id === activeId}
-					data-id={s.id}
-					href={`/s/${s.id}`}
-					onclick={() => (mobileSidebarOpen = false)}
-				>
-					<span class="run-dot" class:running={threads[s.id]?.status === 'running'}></span>
-					<span class="label">{shortLabel(s)}</span>
-					{#if s.cwd}<span class="cwd">{s.cwd}</span>{/if}
-				</a>
+				<div class="session-row">
+					<a
+						class="session"
+						class:active={s.id === activeId}
+						data-id={s.id}
+						href={`/s/${s.id}`}
+						onclick={() => (mobileSidebarOpen = false)}
+					>
+						<span class="run-dot" class:running={threads[s.id]?.status === 'running'}></span>
+						<span class="label">{shortLabel(s)}</span>
+						{#if s.cwd}<span class="cwd">{s.cwd}</span>{/if}
+					</a>
+					<button
+						class="delete-session"
+						type="button"
+						aria-label={`delete session ${shortLabel(s)}`}
+						onclick={() => deleteSession(s.id)}
+					>
+						×
+					</button>
+				</div>
 			{:else}
 				<div class="empty">no sessions yet</div>
 			{/each}
@@ -1184,6 +1212,10 @@
 		padding: 0 8px;
 		min-height: 0;
 	}
+	.session-row {
+		position: relative;
+		margin-bottom: 2px;
+	}
 	.session {
 		width: 100%;
 		text-align: left;
@@ -1199,7 +1231,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
-		margin-bottom: 2px;
+		padding-right: 34px;
 	}
 	.session:hover {
 		background: var(--panel);
@@ -1222,6 +1254,29 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	.delete-session {
+		position: absolute;
+		top: 6px;
+		right: 6px;
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		background: transparent;
+		border: 1px solid transparent;
+		border-radius: 5px;
+		color: var(--fg-dim);
+		cursor: pointer;
+		font-family: var(--mono);
+		font-size: 16px;
+		line-height: 1;
+		opacity: 0.65;
+	}
+	.delete-session:hover {
+		border-color: var(--err);
+		color: var(--err);
+		opacity: 1;
 	}
 	.run-dot {
 		display: inline-block;
@@ -1681,6 +1736,14 @@
 		.session {
 			min-height: 48px;
 			padding: 8px 10px;
+			padding-right: 42px;
+		}
+
+		.delete-session {
+			top: 7px;
+			right: 7px;
+			width: 34px;
+			height: 34px;
 		}
 
 		.empty {
