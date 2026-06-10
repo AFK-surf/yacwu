@@ -79,10 +79,6 @@ yacwu has no auth of its own; put it behind a reverse proxy that authenticates
 users and injects a `Remote-User` header (Authelia, Traefik forward-auth,
 oauth2-proxy, …). Pass an allowlist to require that header:
 
-## License
-
-MIT
-
 ```bash
 ./yacwu --remote-user alice,bob       # or: YACWU_REMOTE_USERS=alice,bob ./yacwu
 ```
@@ -132,3 +128,7 @@ tree) holding that path; if one exists it returns `409` and the UI shows a
 warning with the offending process so you can cancel or "open anyway". This is
 Linux-only; on platforms without `/proc` it degrades to no detection rather than
 blocking.
+
+## License
+
+MIT
