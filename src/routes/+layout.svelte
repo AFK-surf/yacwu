@@ -41,6 +41,7 @@
 	let threads = $state<Record<string, ThreadState>>({});
 	let input = $state('');
 	let selectedImages = $state<SelectedImage[]>([]);
+	let sendingMessage = $state(false);
 	let connected = $state(false);
 	let loadingHistory = $state(false);
 	let cwds = $state<Record<string, string>>({});
@@ -48,6 +49,12 @@
 	let mobileSidebarOpen = $state(false);
 	let mobileViewport = $state(false);
 	let imageInputEl = $state<HTMLInputElement | null>(null);
+	let transcriptScrollTop = $state(0);
+	let transcriptViewportHeight = $state(0);
+	let transcriptHeightVersion = $state(0);
+	const rowHeights = new Map<string, number>();
+	const ESTIMATED_ROW_HEIGHT = 72;
+	const VIRTUAL_OVERSCAN_PX = 700;
 
 	// The active session is whatever is in the URL (/s/<id>); / shows the welcome.
 	const activeId = $derived(page.params.id ?? null);
@@ -55,6 +62,7 @@
 	const composerPlaceholder = $derived(
 		mobileViewport ? 'message codex' : 'message codex…  (Enter to send, Shift+Enter for newline)'
 	);
+	const SEND_FETCH_RETRIES = 3;
 
 	// New-session working-directory picker.
 	let creating = $state(false);
@@ -64,6 +72,10 @@
 	let cwdInputEl = $state<HTMLInputElement | null>(null);
 
 	let transcriptEl = $state<HTMLDivElement | null>(null);
+	const activeItems = $derived(itemsOf(active).filter(isRenderableTranscriptItem));
+	const virtualTranscript = $derived(
+		virtualizeItems(activeItems, transcriptScrollTop, transcriptViewportHeight, transcriptHeightVersion)
+	);
 
 	function ensureThread(id: string): ThreadState {
 		if (!threads[id]) {
@@ -241,7 +253,91 @@
 
 	async function scrollToBottom() {
 		await tick();
-		if (transcriptEl) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+		if (!transcriptEl) return;
+		transcriptEl.scrollTop = transcriptEl.scrollHeight;
+		requestAnimationFrame(() => {
+			if (transcriptEl) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+		});
+	}
+
+	function transcriptRowKey(item: ThreadItem): string {
+		return `${activeId ?? 'none'}:${(item as any).id ?? ''}`;
+	}
+
+	function measuredRowHeight(item: ThreadItem): number {
+		return rowHeights.get(transcriptRowKey(item)) ?? ESTIMATED_ROW_HEIGHT;
+	}
+
+	function virtualizeItems(
+		items: ThreadItem[],
+		scrollTop: number,
+		viewportHeight: number,
+		_heightVersion: number
+	): { items: ThreadItem[]; before: number; after: number; total: number } {
+		if (items.length === 0) return { items: [], before: 0, after: 0, total: 0 };
+
+		const startOffset = Math.max(0, scrollTop - VIRTUAL_OVERSCAN_PX);
+		const endOffset = scrollTop + viewportHeight + VIRTUAL_OVERSCAN_PX;
+		let before = 0;
+		let start = 0;
+
+		while (start < items.length) {
+			const h = measuredRowHeight(items[start]);
+			if (before + h >= startOffset) break;
+			before += h;
+			start += 1;
+		}
+
+		let renderedHeight = 0;
+		let end = start;
+		while (end < items.length) {
+			const h = measuredRowHeight(items[end]);
+			renderedHeight += h;
+			end += 1;
+			if (before + renderedHeight > endOffset) break;
+		}
+
+		let after = 0;
+		for (let i = end; i < items.length; i += 1) after += measuredRowHeight(items[i]);
+		return { items: items.slice(start, end), before, after, total: before + renderedHeight + after };
+	}
+
+	function updateTranscriptViewport() {
+		if (!transcriptEl) {
+			transcriptViewportHeight = 0;
+			transcriptScrollTop = 0;
+			return;
+		}
+		transcriptViewportHeight = transcriptEl.clientHeight;
+		transcriptScrollTop = transcriptEl.scrollTop;
+	}
+
+	function onTranscriptScroll() {
+		updateTranscriptViewport();
+	}
+
+	function measureTranscriptRow(node: HTMLElement, key: string) {
+		const measure = () => {
+			const next = node.getBoundingClientRect().height;
+			if (next <= 0) return;
+			const prev = rowHeights.get(key);
+			if (prev === undefined || Math.abs(prev - next) > 0.5) {
+				rowHeights.set(key, next);
+				transcriptHeightVersion += 1;
+			}
+		};
+		measure();
+		const observer = new ResizeObserver(measure);
+		observer.observe(node);
+		return {
+			update(nextKey: string) {
+				key = nextKey;
+				measure();
+			},
+			destroy() {
+				observer.disconnect();
+			}
+		};
 	}
 
 	async function loadSessions() {
@@ -341,34 +437,75 @@
 		goto('/');
 	}
 
+	function isFailedFetch(err: unknown): boolean {
+		return err instanceof TypeError && err.message === 'Failed to fetch';
+	}
+
+	function retryDelay(attempt: number): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+	}
+
+	async function sendMessageRequest(id: string, text: string, images: File[]): Promise<Response> {
+		if (images.length > 0) {
+			const body = new FormData();
+			body.set('text', text);
+			for (const image of images) body.append('images', image, image.name);
+			return fetch(`/api/threads/${id}/message`, { method: 'POST', body });
+		}
+
+		return fetch(`/api/threads/${id}/message`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ text })
+		});
+	}
+
+	async function sendMessageWithRetries(id: string, text: string, images: File[]): Promise<Response> {
+		for (let attempt = 0; ; attempt += 1) {
+			try {
+				return await sendMessageRequest(id, text, images);
+			} catch (err) {
+				if (!isFailedFetch(err) || attempt >= SEND_FETCH_RETRIES) throw err;
+				await retryDelay(attempt);
+			}
+		}
+	}
+
 	async function send() {
-		const text = input.trim();
+		if (sendingMessage) return;
+		const draftInput = input;
+		const draftImages = selectedImages;
+		const text = draftInput.trim();
 		if ((!text && selectedImages.length === 0) || !activeId) return;
 		const id = activeId;
-		const images = selectedImages.map((img) => img.file);
-		input = '';
-		selectedImages = [];
+		const images = draftImages.map((img) => img.file);
 
 		// Slash commands are handled client-side and dispatched to dedicated RPCs,
 		// mirroring the Codex TUI. Everything else is a normal model turn.
 		if (text.startsWith('/') && images.length === 0) {
+			input = '';
 			await handleSlash(id, text);
 			return;
 		}
 
 		const t = ensureThread(id);
 		t.status = 'running';
-		if (images.length > 0) {
-			const body = new FormData();
-			body.set('text', text);
-			for (const image of images) body.append('images', image, image.name);
-			await fetch(`/api/threads/${id}/message`, { method: 'POST', body });
-		} else {
-			await fetch(`/api/threads/${id}/message`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({ text })
-			});
+		sendingMessage = true;
+		try {
+			const res = await sendMessageWithRetries(id, text, images);
+
+			if (!res.ok) {
+				const data = await res.json().catch(() => ({}));
+				throw new Error(data.error ?? `failed to send message (${res.status})`);
+			}
+
+			if (input === draftInput) input = '';
+			if (selectedImages === draftImages) selectedImages = [];
+		} catch (err) {
+			t.status = 'idle';
+			addLocalNote(id, err instanceof Error ? err.message : 'failed to send message', 'err');
+		} finally {
+			sendingMessage = false;
 		}
 	}
 
@@ -615,6 +752,10 @@
 	function itemsOf(t: ThreadState | null): ThreadItem[] {
 		if (!t) return [];
 		return t.order.map((id) => t.byId[id]).filter(Boolean);
+	}
+
+	function isRenderableTranscriptItem(item: ThreadItem): boolean {
+		return item.type !== 'reasoning' || Boolean(reasoningText(item));
 	}
 
 	function imageSrc(path: string): string {
@@ -898,110 +1039,114 @@
 					</div>
 				</div>
 			{:else}
-				<div class="transcript" bind:this={transcriptEl}>
+				<div class="transcript" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
 					{#if loadingHistory}
 						<div class="sys">loading history…</div>
 					{/if}
-					{#each itemsOf(active) as item (item.id)}
-						{#if item.type === 'userMessage'}
-							<div class="item user">
-								<span class="gutter">›</span>
-								<div class="body media-body">
-									{#each userParts(item) as part}
-										{#if part.type === 'text'}
-											<span>{part.text}</span>
-										{:else}
-											<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
-												<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
-												<span>{imageLabel(part.path)}</span>
-											</a>
-										{/if}
-									{/each}
+					<div class="transcript-spacer" style={`height: ${virtualTranscript.before}px`}></div>
+					{#each virtualTranscript.items as item (item.id)}
+						<div class="virtual-row" use:measureTranscriptRow={transcriptRowKey(item)}>
+							{#if item.type === 'userMessage'}
+								<div class="item user">
+									<span class="gutter">›</span>
+									<div class="body media-body">
+										{#each userParts(item) as part}
+											{#if part.type === 'text'}
+												<span>{part.text}</span>
+											{:else}
+												<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
+													<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
+													<span>{imageLabel(part.path)}</span>
+												</a>
+											{/if}
+										{/each}
+									</div>
 								</div>
-							</div>
-						{:else if item.type === 'agentMessage'}
-							<div class="item agent">
-								<div class="body media-body">
-									{#each agentParts((item as any).text ?? '') as part}
-										{#if part.type === 'text'}
-											<span>{part.text}</span>
-										{:else}
-											<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
-												<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
-												<span>{imageLabel(part.path)}</span>
-											</a>
-										{/if}
-									{/each}
+							{:else if item.type === 'agentMessage'}
+								<div class="item agent">
+									<div class="body media-body">
+										{#each agentParts((item as any).text ?? '') as part}
+											{#if part.type === 'text'}
+												<span>{part.text}</span>
+											{:else}
+												<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
+													<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
+													<span>{imageLabel(part.path)}</span>
+												</a>
+											{/if}
+										{/each}
+									</div>
 								</div>
-							</div>
-						{:else if item.type === 'reasoning'}
-							{#if reasoningText(item)}
-								<div class="item reason">
-									<span class="gutter">∴</span>
-									<div class="body">{reasoningText(item)}</div>
+							{:else if item.type === 'reasoning'}
+								{#if reasoningText(item)}
+									<div class="item reason">
+										<span class="gutter">∴</span>
+										<div class="body">{reasoningText(item)}</div>
+									</div>
+								{/if}
+							{:else if item.type === 'commandExecution'}
+								<div class="item cmd">
+									<div class="cmd-line">
+										<span class="gutter">$</span>
+										<span class="cmd-text">{(item as any).command}</span>
+										<span class="cmd-status {(item as any).status}">{(item as any).status}{#if (item as any).exitCode !== undefined && (item as any).exitCode !== null}({(item as any).exitCode}){/if}</span>
+									</div>
+									{#if (item as any)._out || (item as any).aggregatedOutput}
+										<pre class="cmd-out">{(item as any)._out || (item as any).aggregatedOutput}</pre>
+									{/if}
+								</div>
+							{:else if item.type === 'fileChange'}
+								<div class="item file">
+									<span class="gutter">±</span>
+									<div class="body">
+										{#each (item as any).changes ?? [] as ch}
+											<div class="fc">
+												<span class="kind {fileChangeClass(ch)}">{fileChangeKind(ch)}</span>
+												{fileChangePath(ch)}
+											</div>
+										{/each}
+									</div>
+								</div>
+							{:else if item.type === 'plan'}
+								<div class="item plan">
+									<span class="gutter">◇</span>
+									<div class="body">
+										{#if (item as any).plan}
+											{#each (item as any).plan as step}
+												<div class="step {step.status}">[{step.status === 'completed' ? '✓' : step.status === 'inProgress' ? '~' : ' '}] {step.step}</div>
+											{/each}
+										{:else}{(item as any).text}{/if}
+									</div>
+								</div>
+							{:else if item.type === 'localNote'}
+								<div class="item note {(item as any).tone}">
+									<span class="gutter">/</span>
+									<div class="body">{(item as any).text}</div>
+								</div>
+							{:else if item.type === 'enteredReviewMode'}
+								<div class="item note">
+									<span class="gutter">⚑</span>
+									<div class="body">review started: {(item as any).review}</div>
+								</div>
+							{:else if item.type === 'exitedReviewMode'}
+								<div class="item review">
+									<span class="gutter">⚑</span>
+									<div class="body">{(item as any).review}</div>
+								</div>
+							{:else if item.type === 'contextCompaction'}
+								<div class="item note">
+									<span class="gutter">⤳</span>
+									<div class="body">history compacted</div>
+								</div>
+							{:else}
+								<div class="item generic">
+									<span class="gutter">·</span>
+									<div class="body">{item.type}</div>
 								</div>
 							{/if}
-						{:else if item.type === 'commandExecution'}
-							<div class="item cmd">
-								<div class="cmd-line">
-									<span class="gutter">$</span>
-									<span class="cmd-text">{(item as any).command}</span>
-									<span class="cmd-status {(item as any).status}">{(item as any).status}{#if (item as any).exitCode !== undefined && (item as any).exitCode !== null}({(item as any).exitCode}){/if}</span>
-								</div>
-								{#if (item as any)._out || (item as any).aggregatedOutput}
-									<pre class="cmd-out">{(item as any)._out || (item as any).aggregatedOutput}</pre>
-								{/if}
-							</div>
-						{:else if item.type === 'fileChange'}
-							<div class="item file">
-								<span class="gutter">±</span>
-								<div class="body">
-									{#each (item as any).changes ?? [] as ch}
-										<div class="fc">
-											<span class="kind {fileChangeClass(ch)}">{fileChangeKind(ch)}</span>
-											{fileChangePath(ch)}
-										</div>
-									{/each}
-								</div>
-							</div>
-						{:else if item.type === 'plan'}
-							<div class="item plan">
-								<span class="gutter">◇</span>
-								<div class="body">
-									{#if (item as any).plan}
-										{#each (item as any).plan as step}
-											<div class="step {step.status}">[{step.status === 'completed' ? '✓' : step.status === 'inProgress' ? '~' : ' '}] {step.step}</div>
-										{/each}
-									{:else}{(item as any).text}{/if}
-								</div>
-							</div>
-						{:else if item.type === 'localNote'}
-							<div class="item note {(item as any).tone}">
-								<span class="gutter">/</span>
-								<div class="body">{(item as any).text}</div>
-							</div>
-						{:else if item.type === 'enteredReviewMode'}
-							<div class="item note">
-								<span class="gutter">⚑</span>
-								<div class="body">review started: {(item as any).review}</div>
-							</div>
-						{:else if item.type === 'exitedReviewMode'}
-							<div class="item review">
-								<span class="gutter">⚑</span>
-								<div class="body">{(item as any).review}</div>
-							</div>
-						{:else if item.type === 'contextCompaction'}
-							<div class="item note">
-								<span class="gutter">⤳</span>
-								<div class="body">history compacted</div>
-							</div>
-						{:else}
-							<div class="item generic">
-								<span class="gutter">·</span>
-								<div class="body">{item.type}</div>
-							</div>
-						{/if}
+						</div>
 					{/each}
+					<div class="transcript-spacer" style={`height: ${virtualTranscript.after}px`}></div>
 					{#if active?.status === 'running'}
 						<div class="item agent"><div class="body blink">▍</div></div>
 					{/if}
@@ -1027,7 +1172,9 @@
 						onkeydown={onKeydown}
 						rows="1"
 					></textarea>
-					<button class="send" onclick={send} disabled={!input.trim() && selectedImages.length === 0}>send</button>
+					<button class="send" onclick={send} disabled={sendingMessage || (!input.trim() && selectedImages.length === 0)}>
+						send
+					</button>
 				</div>
 				{#if selectedImages.length > 0}
 					<div class="attachments">
@@ -1484,13 +1631,18 @@
 		overflow-y: auto;
 		padding: 18px;
 		min-height: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
+		overflow-anchor: none;
+	}
+	.transcript-spacer {
+		flex: none;
+	}
+	.virtual-row {
+		padding-bottom: 10px;
 	}
 	.sys {
 		color: var(--fg-dim);
 		font-style: italic;
+		padding-bottom: 10px;
 	}
 	.item {
 		display: flex;
@@ -1933,7 +2085,10 @@
 
 		.transcript {
 			padding: 12px;
-			gap: 12px;
+		}
+
+		.virtual-row {
+			padding-bottom: 12px;
 		}
 
 		.item {
