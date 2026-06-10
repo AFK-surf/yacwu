@@ -79,6 +79,10 @@ yacwu has no auth of its own; put it behind a reverse proxy that authenticates
 users and injects a `Remote-User` header (Authelia, Traefik forward-auth,
 oauth2-proxy, …). Pass an allowlist to require that header:
 
+## License
+
+MIT
+
 ```bash
 ./yacwu --remote-user alice,bob       # or: YACWU_REMOTE_USERS=alice,bob ./yacwu
 ```
