@@ -3,6 +3,9 @@ export type SlashCommand =
 	| { kind: 'status' }
 	| { kind: 'model-show' }
 	| { kind: 'model-set'; model?: string; effort?: string }
+	| { kind: 'profile-show' }
+	| { kind: 'profile-set'; profile: string }
+	| { kind: 'profile-clear' }
 	| { kind: 'goal-show' }
 	| { kind: 'goal-clear' }
 	| { kind: 'goal-set'; objective: string; tokenBudget?: number }
@@ -19,6 +22,9 @@ const COMMANDS: ReadonlyArray<readonly [string, string]> = [
 	['/model', 'show the current model and available choices'],
 	['/model <model> [effort]', 'change model and reasoning effort'],
 	['/model --effort <effort>', 'change reasoning effort only'],
+	['/profile', 'show the session profile and available choices'],
+	['/profile <name>', 'switch this session to a codex profile'],
+	['/profile clear', 'go back to the base codex config'],
 	['/goal <objective>', 'set the thread goal'],
 	['/goal --budget N <goal>', 'set the goal with a token budget'],
 	['/goal', 'show the current goal'],
@@ -86,6 +92,12 @@ export function parseSlash(text: string): SlashCommand {
 			return arg ? { kind: 'unknown', command: cmd } : { kind: 'status' };
 		case '/model':
 			return parseModel(arg);
+		case '/profile': {
+			if (!arg) return { kind: 'profile-show' };
+			const lower = arg.toLowerCase();
+			if (lower === 'clear' || lower === 'default') return { kind: 'profile-clear' };
+			return { kind: 'profile-set', profile: arg };
+		}
 		case '/goal':
 			return parseGoal(arg);
 		case '/compact':

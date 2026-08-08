@@ -14,6 +14,7 @@ import mist
 import yacwu/codex
 import yacwu/config
 import yacwu/model_state
+import yacwu/profiles
 import yacwu/router
 import yacwu/unix_proxy
 
@@ -53,16 +54,19 @@ pub fn main() -> Nil {
 fn serve(conf: config.Config) -> Nil {
   let codex_name = process.new_name("yacwu_codex")
   let store_name = process.new_name("yacwu_models")
+  let profile_store_name = process.new_name("yacwu_profiles")
   let assert Ok(_) =
     supervisor.new(supervisor.OneForOne)
     |> supervisor.add(codex.supervised(codex_name))
     |> supervisor.add(model_state.supervised(store_name))
+    |> supervisor.add(profiles.supervised(profile_store_name))
     |> supervisor.start
 
   let ctx =
     router.Context(
       codex: codex_name,
       store: store_name,
+      profile_store: profile_store_name,
       static_dir: conf.static_dir,
     )
 

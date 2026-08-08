@@ -44,6 +44,11 @@
 		models: ModelChoice[];
 	}
 
+	interface ProfileChoice {
+		name: string;
+		model: string | null;
+	}
+
 	type RenderPart =
 		| { type: 'text'; text: string }
 		| { type: 'image'; path: string; source: 'local' | 'remote' };
@@ -78,10 +83,12 @@
 	);
 	const SEND_FETCH_RETRIES = 3;
 
-	// New-session working-directory picker.
+	// New-session working-directory / profile picker.
 	let creating = $state(false);
 	let createError = $state<string | null>(null);
 	let newCwd = $state('');
+	let newProfile = $state('');
+	let profileChoices = $state<ProfileChoice[]>([]);
 	let defaultCwd = $state('');
 	let cwdInputEl = $state<HTMLInputElement | null>(null);
 
@@ -368,7 +375,13 @@
 	async function startCreating() {
 		createError = null;
 		newCwd = '';
+		newProfile = '';
 		creating = true;
+		// Always re-fetch: the backend reads profile files fresh from disk.
+		fetch('/api/profiles')
+			.then((r) => r.json())
+			.then((d) => (profileChoices = (d.profiles ?? []) as ProfileChoice[]))
+			.catch(() => (profileChoices = []));
 		await tick();
 		cwdInputEl?.focus();
 	}
@@ -380,10 +393,11 @@
 
 	async function newSession(cwd?: string) {
 		createError = null;
+		const profile = newProfile.trim();
 		const res = await fetch('/api/threads', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify(cwd ? { cwd } : {})
+			body: JSON.stringify({ ...(cwd ? { cwd } : {}), ...(profile ? { profile } : {}) })
 		});
 		const data = await res.json();
 		if (!res.ok) {
@@ -581,6 +595,13 @@
 			lines.push('  model     unavailable');
 			lines.push('  effort    unavailable');
 		}
+		try {
+			const res = await fetch(`/api/threads/${id}/profile`);
+			const data = await res.json();
+			if (res.ok && data.profile) lines.push(`  profile   ${data.profile}`);
+		} catch {
+			/* no profile line */
+		}
 		if (t?.tokens) lines.push(`  tokens    ${t.tokens.toLocaleString()}`);
 		if (t?.goal) lines.push(`  goal      ${t.goal.objective} (${t.goal.status})`);
 		try {
@@ -657,6 +678,49 @@
 				addLocalNote(
 					id,
 					ok ? `model set: ${data.model} · effort ${data.effort}` : data.error ?? 'failed to change model settings',
+					ok ? 'info' : 'err'
+				);
+				break;
+			}
+
+			case 'profile-show': {
+				try {
+					const res = await fetch(`/api/threads/${id}/profile`);
+					const data = await res.json();
+					if (!res.ok) throw new Error(data.error);
+					const lines = [`profile: ${data.profile ?? '(base config)'}`];
+					const choices = (data.profiles ?? []) as ProfileChoice[];
+					if (choices.length > 0) {
+						lines.push('', 'available profiles');
+						for (const p of choices) {
+							lines.push(`  ${p.name.padEnd(24)} ${p.model ?? ''}`.trimEnd());
+						}
+					} else {
+						lines.push('', 'no profiles found ($CODEX_HOME/<name>.config.toml)');
+					}
+					lines.push('', 'usage: /profile <name>', '       /profile clear');
+					addLocalNote(id, lines.join('\n'));
+				} catch {
+					addLocalNote(id, 'failed to read profile', 'err');
+				}
+				break;
+			}
+
+			case 'profile-set': {
+				const { ok, data } = await postCmd(id, 'profile', { profile: parsed.profile });
+				addLocalNote(
+					id,
+					ok ? `profile set: ${data.profile}` : data.error ?? 'failed to set profile',
+					ok ? 'info' : 'err'
+				);
+				break;
+			}
+
+			case 'profile-clear': {
+				const { ok, data } = await postCmd(id, 'profile', { clear: true });
+				addLocalNote(
+					id,
+					ok ? 'profile cleared (base config)' : data.error ?? 'failed to clear profile',
 					ok ? 'info' : 'err'
 				);
 				break;
@@ -994,6 +1058,17 @@
 						autocomplete="off"
 					/>
 				</div>
+				{#if profileChoices.length > 0}
+					<div class="create-row">
+						<span class="prompt">-p</span>
+						<select class="profile-input" bind:value={newProfile}>
+							<option value="">(base config)</option>
+							{#each profileChoices as p (p.name)}
+								<option value={p.name}>{p.name}{p.model ? ` · ${p.model}` : ''}</option>
+							{/each}
+						</select>
+					</div>
+				{/if}
 				<div class="create-actions">
 					<button class="mini" onclick={() => newSession(newCwd.trim() || undefined)}>start</button>
 					<button class="mini ghost" onclick={cancelCreating}>esc</button>
@@ -1397,6 +1472,21 @@
 		padding: 5px 7px;
 	}
 	.cwd-input:focus {
+		outline: none;
+		border-color: var(--accent-dim);
+	}
+	.profile-input {
+		flex: 1;
+		min-width: 0;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		color: var(--fg);
+		font-family: var(--mono);
+		font-size: 12px;
+		padding: 5px 7px;
+	}
+	.profile-input:focus {
 		outline: none;
 		border-color: var(--accent-dim);
 	}

@@ -17,6 +17,8 @@ state lives entirely in Codex's own persistent sessions, read back via
   already has loaded (so two processes don't corrupt one conversation)
 - ⚡ Live streaming of agent messages, reasoning, command runs, file changes & plans
 - ⌨️ Slash commands mirroring the Codex TUI (see below)
+- 🎛️ Per-session codex profiles: pick a `$CODEX_HOME/<name>.config.toml` when
+  creating a session (or with `/profile`)
 - 🔌 Single `codex app-server` process multiplexed over one connection; events
   fan out to the browser via Server-Sent Events
 - 🗄️ No storage layer — Codex is the source of truth
@@ -30,6 +32,8 @@ Type these in the composer (anything not starting with `/` is a normal model tur
 | `/status` | show account, rate limits & session info |
 | `/model` | show the current model, reasoning effort, and available choices |
 | `/model <model> [effort]` | change the model and optional reasoning effort (`--effort <effort>` changes effort only) |
+| `/profile` | show the session's codex profile and the available choices |
+| `/profile <name>` / `/profile clear` | switch this session to a profile / back to the base config |
 | `/goal <objective>` | set the thread goal (`--budget N` to add a token budget) |
 | `/goal` / `/goal clear` | show / clear the current goal |
 | `/compact` | compact conversation history |
@@ -167,6 +171,23 @@ to Erlang built-ins — no Erlang source files, no NIFs.
 Threads run in "yolo" mode — `approvalPolicy: "never"` and
 `sandbox: "danger-full-access"` — so the web UI never blocks on an interactive
 approval prompt and commands run with full access.
+
+### Per-session profiles
+
+codex profiles are `$CODEX_HOME/<name>.config.toml` files layered over the
+base config — but codex only applies them via the `--profile` CLI flag, which
+doesn't work with `codex app-server`, and the app-server protocol has no
+profile parameter. yacwu emulates the layering per-thread: the chosen
+profile file is parsed and passed as the generic `config` override map on
+`thread/start` / `thread/resume` (plus the profile's model/effort on
+`turn/start`). Explicit request params beat that map, so yacwu's forced
+`approvalPolicy: "never"` survives any profile, and an explicit `/model`
+override wins over the profile's model.
+
+Profile files are re-read from disk on every request — nothing is cached, so
+edits take effect immediately. Which profile a session uses is remembered
+in-memory; after a server restart it is re-inferred as the profile whose
+`model` matches the session's current model, if any.
 
 ### In-use detection
 

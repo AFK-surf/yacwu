@@ -25,6 +25,38 @@ function startHolder(resumeId?: string): Promise<{ proc: ChildProcess; threadId:
 	});
 }
 
+// Sessions created during a test are real codex sessions in the shared
+// ~/.codex store — visible to every other codex client on this machine. Track
+// each one (by sniffing successful POST /api/threads responses) and archive
+// them when the test ends, so runs don't pollute the user's session list.
+const createdIds: string[] = [];
+
+test.beforeEach(async ({ page }) => {
+	createdIds.length = 0;
+	await page.route('**/api/threads', async (route) => {
+		if (route.request().method() !== 'POST') return route.fallback();
+		const response = await route.fetch();
+		try {
+			const data = await response.json();
+			if (data?.thread?.id) createdIds.push(data.thread.id);
+			await route.fulfill({ response, json: data });
+		} catch {
+			await route.fulfill({ response });
+		}
+	});
+});
+
+test.afterEach(async ({ request }) => {
+	for (const id of createdIds) {
+		// Clear any goal first: a goal left active (e.g. by a mid-test failure)
+		// is a real instruction codex's goal engine may autonomously pursue.
+		await request
+			.post(`/api/threads/${id}/goal`, { data: { clear: true } })
+			.catch(() => {});
+		await request.post(`/api/threads/${id}/archive`).catch(() => {});
+	}
+});
+
 test('loads CLI-style dark UI', async ({ page }) => {
 	await page.goto('/');
 	await expect(page.locator('.brand')).toContainText('yacwu');
@@ -128,12 +160,12 @@ test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) 
 	await expect(page.locator('.item.note.err').last()).toContainText('unknown command');
 
 	// /goal sets a goal -> header shows it, a note confirms.
-	await ta.fill('/goal Finish the slash router');
+	await ta.fill('/goal Placeholder e2e goal (not an instruction)');
 	await page.locator('button.send').click();
-	await expect(page.locator('.topbar .goal')).toContainText('Finish the slash router', {
+	await expect(page.locator('.topbar .goal')).toContainText('Placeholder e2e goal (not an instruction)', {
 		timeout: 15_000
 	});
-	await expect(page.locator('.goal-tracker')).toContainText('Finish the slash router');
+	await expect(page.locator('.goal-tracker')).toContainText('Placeholder e2e goal (not an instruction)');
 	await expect(page.locator('.goal-tracker')).toContainText('active');
 	await expect(page.locator('.item.note').last()).toContainText('goal set');
 
@@ -141,7 +173,7 @@ test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) 
 	await ta.fill('/goal');
 	await page.locator('button.send').click();
 	await expect(page.locator('.item.note').last()).toContainText(
-		'goal: Finish the slash router',
+		'goal: Placeholder e2e goal (not an instruction)',
 		{ timeout: 15_000 }
 	);
 
@@ -416,4 +448,69 @@ test('session id is reflected in the URL and the sidebar uses links', async ({ p
 	await page.goto(`/s/${id}`);
 	await expect(page.locator('.composer')).toBeVisible({ timeout: 15_000 });
 	await expect(page.locator('.topbar .tid')).toHaveText(id.slice(0, 8));
+});
+
+test('slash command & picker: /profile selects codex profiles', async ({ page }) => {
+	const profiles = [
+		{ name: 'deep', model: 'gpt-5.4' },
+		{ name: 'fast', model: 'gpt-5.4-mini' }
+	];
+	await page.route('**/api/profiles', async (route) => {
+		await route.fulfill({ json: { profiles } });
+	});
+	let current: string | null = null;
+	let posted: any = null;
+	await page.route('**/api/threads/*/profile', async (route) => {
+		if (route.request().method() === 'POST') {
+			posted = route.request().postDataJSON();
+			current = posted.clear ? null : (posted.profile ?? null);
+		}
+		await route.fulfill({ json: { profile: current, profiles } });
+	});
+	let createBody: any = null;
+	await page.route('**/api/threads', async (route) => {
+		if (route.request().method() === 'POST') createBody = route.request().postDataJSON();
+		await route.fallback();
+	});
+
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+
+	// The picker lists profiles (from the stub) with the base config default.
+	await page.locator('button.new').click();
+	await expect(page.locator('.profile-input')).toBeVisible();
+	await expect(page.locator('.profile-input option')).toHaveCount(3);
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await expect(page.locator('.composer')).toBeVisible();
+	expect(createBody).toEqual({});
+
+	// /profile shows the current selection and the available profiles.
+	const ta = page.locator('.composer textarea');
+	await ta.fill('/profile');
+	await page.locator('button.send').click();
+	const note = page.locator('.item.note .body').last();
+	await expect(note).toContainText('profile: (base config)');
+	await expect(note).toContainText('fast');
+	await expect(note).toContainText('gpt-5.4-mini');
+
+	// /profile <name> posts the selection; /profile clear reverts.
+	await ta.fill('/profile fast');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note .body').last()).toContainText('profile set: fast');
+	expect(posted).toEqual({ profile: 'fast' });
+
+	await ta.fill('/profile clear');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note .body').last()).toContainText('profile cleared');
+	expect(posted).toEqual({ clear: true });
+
+	// Creating via the picker sends the profile; the real backend rejects the
+	// stub-only name, proving validation runs against the profiles on disk.
+	await page.locator('button.new').click();
+	await page.locator('.profile-input').selectOption('fast');
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await expect(page.locator('.create-err')).toContainText('unknown profile: fast', {
+		timeout: 15_000
+	});
+	expect(createBody).toEqual({ profile: 'fast' });
 });

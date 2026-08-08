@@ -28,11 +28,17 @@ import yacwu/codex.{type Codex}
 import yacwu/defaults
 import yacwu/jsonx
 import yacwu/model_state.{type Store}
+import yacwu/profiles
 import yacwu/session_lock
 import yacwu/static_files
 
 pub type Context {
-  Context(codex: Codex, store: Store, static_dir: String)
+  Context(
+    codex: Codex,
+    store: Store,
+    profile_store: profiles.Store,
+    static_dir: String,
+  )
 }
 
 const max_body = 104_857_600
@@ -115,6 +121,9 @@ fn dispatch(
       }
     ["api", "account"], Get -> account(ctx)
     ["api", "images"], Get -> image(req, include_body)
+    ["api", "profiles"], Get -> list_profiles()
+    ["api", "threads", id, "profile"], Get -> get_profile(ctx, id)
+    ["api", "threads", id, "profile"], Post -> post_profile(ctx, req, id)
     ["api", "threads"], Get -> list_threads(ctx)
     ["api", "threads"], Post -> create_thread(ctx, req)
     ["api", "threads", id, "open"], Post -> open_thread(ctx, req, id)
@@ -342,6 +351,128 @@ fn image(
   }
 }
 
+// -- /api/profiles and /api/threads/[id]/profile ------------------------------
+
+/// Available codex profiles ($CODEX_HOME/<name>.config.toml files).
+fn list_profiles() -> Response(ResponseData) {
+  json_response(
+    200,
+    json.object([
+      #("profiles", profiles.profiles_to_json(profiles.list_profiles())),
+    ]),
+  )
+}
+
+/// The profile a session is using: its stored selection if this server made
+/// one, otherwise inferred as the profile whose `model` matches the session's
+/// current model (so selections survive server restarts). A successful
+/// inference is stored.
+fn resolve_profile(
+  ctx: Context,
+  thread_id: String,
+  available: List(profiles.Profile),
+  rollout_path: Result(String, Nil),
+) -> Result(profiles.Profile, Nil) {
+  case profiles.get_selection(ctx.profile_store, thread_id) {
+    Ok(name) -> profiles.find(available, name)
+    Error(_) -> {
+      use path <- result.try(rollout_path)
+      use persisted <- result.try(model_state.read_latest_turn_model(path))
+      use model <- result.try(option.to_result(persisted.model, Nil))
+      use profile <- result.try(profiles.infer_for_model(available, model))
+      profiles.set_selection(ctx.profile_store, thread_id, Some(profile.name))
+      Ok(profile)
+    }
+  }
+}
+
+/// The session's rollout path, for profile inference (absent for threads that
+/// haven't materialized yet).
+fn thread_rollout_path(ctx: Context, thread_id: String) -> Result(String, Nil) {
+  codex.request(
+    ctx.codex,
+    "thread/read",
+    json.object([
+      #("threadId", json.string(thread_id)),
+      #("includeTurns", json.bool(False)),
+    ]),
+  )
+  |> result.replace_error(Nil)
+  |> result.try(jsonx.field_string(_, ["thread", "path"]))
+}
+
+fn profile_state_json(
+  selected: Result(profiles.Profile, Nil),
+  available: List(profiles.Profile),
+) -> Json {
+  json.object([
+    #("profile", case selected {
+      Ok(profile) -> json.string(profile.name)
+      Error(_) -> json.null()
+    }),
+    #("profiles", profiles.profiles_to_json(available)),
+  ])
+}
+
+fn get_profile(ctx: Context, thread_id: String) -> Response(ResponseData) {
+  let available = profiles.list_profiles()
+  let selected =
+    resolve_profile(ctx, thread_id, available, {
+      thread_rollout_path(ctx, thread_id)
+    })
+  json_response(200, profile_state_json(selected, available))
+}
+
+/// Select (or clear) a session's profile. Selecting re-resumes the thread
+/// with the profile's config layered in, so it takes effect immediately;
+/// clearing only affects how future opens resolve — settings already
+/// persisted on the thread remain until changed.
+fn post_profile(
+  ctx: Context,
+  req: Request(Connection),
+  thread_id: String,
+) -> Response(ResponseData) {
+  let body = read_json_body(req)
+  let available = profiles.list_profiles()
+  let requested =
+    jsonx.field_string(body, ["profile"])
+    |> result.unwrap("")
+    |> string.trim
+  case jsonx.field_bool(body, ["clear"]) == Ok(True) || requested == "" {
+    True -> {
+      profiles.set_selection(ctx.profile_store, thread_id, None)
+      json_response(200, profile_state_json(Error(Nil), available))
+    }
+    False ->
+      case profiles.find(available, requested) {
+        Error(_) ->
+          json_response(400, error_body("unknown profile: " <> requested))
+        Ok(profile) -> {
+          profiles.set_selection(
+            ctx.profile_store,
+            thread_id,
+            Some(profile.name),
+          )
+          // Re-resume with the profile layered in so the full config applies
+          // immediately. A brand-new thread has no rollout to resume yet —
+          // the selection still holds: its model/effort ride along on
+          // turn/start, and the full config layers in on the next open.
+          let _ =
+            codex.request(
+              ctx.codex,
+              "thread/resume",
+              json.object([
+                #("threadId", json.string(thread_id)),
+                #("config", profiles.config_json(profile)),
+                ..defaults.thread_defaults()
+              ]),
+            )
+          json_response(200, profile_state_json(Ok(profile), available))
+        }
+      }
+  }
+}
+
 // -- /api/threads -------------------------------------------------------------
 
 /// List stored codex sessions (newest first), plus the default working dir.
@@ -374,35 +505,56 @@ fn create_thread(
 ) -> Response(ResponseData) {
   let body = read_json_body(req)
   let params = defaults.thread_defaults()
-  let cwd = case jsonx.field_string(body, ["cwd"]) {
-    Ok(cwd) if cwd != "" -> Some(resolve_cwd(cwd))
-    _ -> None
+  let params = case jsonx.field_string(body, ["model"]) {
+    Ok(model) if model != "" -> [#("model", json.string(model)), ..params]
+    _ -> params
   }
-  case cwd {
-    Some(cwd) ->
+
+  let cwd_params = case jsonx.field_string(body, ["cwd"]) {
+    Ok(cwd) if cwd != "" -> {
+      let cwd = resolve_cwd(cwd)
       case directory_status(cwd) {
-        DirectoryOk -> {
-          let params = [#("cwd", json.string(cwd)), ..params]
-          let params = case jsonx.field_string(body, ["model"]) {
-            Ok(model) if model != "" -> [
-              #("model", json.string(model)),
-              ..params
-            ]
-            _ -> params
+        DirectoryOk -> Ok([#("cwd", json.string(cwd)), ..params])
+        NotADirectory -> Error("Not a directory: " <> cwd)
+        DoesNotExist -> Error("Directory does not exist: " <> cwd)
+      }
+    }
+    _ -> Ok(params)
+  }
+
+  let profile = case jsonx.field_string(body, ["profile"]) {
+    Ok(name) if name != "" ->
+      case profiles.find(profiles.list_profiles(), string.trim(name)) {
+        Ok(profile) -> Ok(Some(profile))
+        Error(_) -> Error("unknown profile: " <> string.trim(name))
+      }
+    _ -> Ok(None)
+  }
+
+  case cwd_params, profile {
+    Error(message), _ | _, Error(message) ->
+      json_response(400, error_body(message))
+    Ok(params), Ok(profile) -> {
+      let params = case profile {
+        Some(profile) -> [#("config", profiles.config_json(profile)), ..params]
+        None -> params
+      }
+      case codex.request(ctx.codex, "thread/start", json.object(params)) {
+        Error(message) -> json_response(500, error_body(message))
+        Ok(result) -> {
+          // Remember the choice for opens/resumes on this server.
+          case profile, jsonx.field_string(result, ["thread", "id"]) {
+            Some(profile), Ok(thread_id) ->
+              profiles.set_selection(
+                ctx.profile_store,
+                thread_id,
+                Some(profile.name),
+              )
+            _, _ -> Nil
           }
-          rpc(ctx, "thread/start", json.object(params))
+          json_response(200, jsonx.to_json(result))
         }
-        NotADirectory ->
-          json_response(400, error_body("Not a directory: " <> cwd))
-        DoesNotExist ->
-          json_response(400, error_body("Directory does not exist: " <> cwd))
       }
-    None -> {
-      let params = case jsonx.field_string(body, ["model"]) {
-        Ok(model) if model != "" -> [#("model", json.string(model)), ..params]
-        _ -> params
-      }
-      rpc(ctx, "thread/start", json.object(params))
     }
   }
 }
@@ -513,15 +665,32 @@ fn open_thread(
       json_response(409, json.object(body))
     }
     [] -> {
-      let resume =
-        codex.request(
-          ctx.codex,
-          "thread/resume",
-          json.object([
-            #("threadId", json.string(thread_id)),
-            ..defaults.thread_defaults()
-          ]),
+      // Layer the session's profile (chosen earlier, or inferred from the
+      // session's model) into the resume. Profiles are re-read from disk on
+      // every open so edits to the files take effect immediately.
+      let profile =
+        resolve_profile(
+          ctx,
+          thread_id,
+          profiles.list_profiles(),
+          case rollout_path {
+            "" -> Error(Nil)
+            path -> Ok(path)
+          },
         )
+      let resume_params = [
+        #("threadId", json.string(thread_id)),
+        ..defaults.thread_defaults()
+      ]
+      let resume_params = case profile {
+        Ok(profile) -> [
+          #("config", profiles.config_json(profile)),
+          ..resume_params
+        ]
+        Error(_) -> resume_params
+      }
+      let resume =
+        codex.request(ctx.codex, "thread/resume", json.object(resume_params))
       case resume {
         Error(message) -> json_response(500, error_body(message))
         Ok(_) ->
@@ -746,13 +915,37 @@ fn message(
         #("threadId", json.string(thread_id)),
         #("input", json.preprocessed_array(input)),
       ]
+      // An explicit /model override wins; otherwise the session's selected
+      // profile supplies model/effort. (turn/start has no `config` param, so
+      // only these two profile keys can apply at turn level — the full
+      // profile config is layered on thread start/resume.)
       let params = case model_state.get_override(ctx.store, thread_id) {
         Ok(settings) ->
           list.append(params, [
             #("model", json.string(settings.model)),
             #("effort", json.string(settings.effort)),
           ])
-        Error(_) -> params
+        Error(_) ->
+          case
+            profiles.get_selection(ctx.profile_store, thread_id)
+            |> result.try(profiles.find(profiles.list_profiles(), _))
+          {
+            Error(_) -> params
+            Ok(profile) -> {
+              let params = case profile.model {
+                Some(model) ->
+                  list.append(params, [#("model", json.string(model))])
+                None -> params
+              }
+              case
+                jsonx.field_string(profile.config, ["model_reasoning_effort"])
+              {
+                Ok(effort) ->
+                  list.append(params, [#("effort", json.string(effort))])
+                Error(_) -> params
+              }
+            }
+          }
       }
       rpc(ctx, "turn/start", json.object(params))
     }

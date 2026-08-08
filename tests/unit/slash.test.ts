@@ -27,3 +27,20 @@ test('/model can change only the effort and rejects extra arguments', () => {
 		command: '/model'
 	});
 });
+
+test('/profile shows the current profile without arguments', () => {
+	expect(parseSlash('/profile')).toEqual({ kind: 'profile-show' });
+});
+
+test('/profile selects a named profile', () => {
+	expect(parseSlash('/profile fast')).toEqual({ kind: 'profile-set', profile: 'fast' });
+	expect(parseSlash('/profile deep review')).toEqual({
+		kind: 'profile-set',
+		profile: 'deep review'
+	});
+});
+
+test('/profile clear (or default) reverts to the base config', () => {
+	expect(parseSlash('/profile clear')).toEqual({ kind: 'profile-clear' });
+	expect(parseSlash('/profile DEFAULT')).toEqual({ kind: 'profile-clear' });
+});
