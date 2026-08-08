@@ -79,6 +79,29 @@ For a deployable artifact, `cd server && gleam export erlang-shipment`
 produces a self-contained BEAM release (needs only Erlang on the target), and
 `bun run build` supplies the static `build/` directory to serve next to it.
 
+## AppImage
+
+```bash
+./scripts/build-appimage.sh   # produces dist/yacwu-x86_64.AppImage
+```
+
+Requires Docker (or podman with the docker CLI shim). The whole build runs in
+an Ubuntu 20.04 (glibc 2.31) container so the resulting AppImage works on
+distros at least that old: it pulls the prebuilt Erlang/OTP for that distro
+from hex.pm's build service (the same builds `erlef/setup-beam` uses), exports
+the backend with `gleam export erlang-shipment`, and bundles the pruned Erlang
+runtime, the web UI build, and the non-glibc shared libraries the runtime
+needs (libssl, libtinfo, …).
+
+```bash
+./dist/yacwu-x86_64.AppImage --help
+./dist/yacwu-x86_64.AppImage 0.0.0.0:8080
+```
+
+The AppImage accepts the same flags/env as the server. It still needs the
+`codex` CLI on `PATH` at runtime (and `libfuse2`, like any AppImage — or run
+it with `--appimage-extract-and-run`).
+
 ## Develop
 
 ```bash

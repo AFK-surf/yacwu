@@ -12,3 +12,6 @@ playwright-report
 # single-binary build artifacts
 /yacwu
 scripts/.gen-assets.js
+
+# AppImage build output
+/dist
