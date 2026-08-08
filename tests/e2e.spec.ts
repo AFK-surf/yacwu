@@ -41,10 +41,12 @@ test('multi-session: create two, stream a reply, switch between them', async ({ 
 	await page.goto('/');
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
 
-	// The session list loads asynchronously; the sidebar footer renders the
-	// count, so wait for it before capturing the baseline (avoids a mid-load race).
-	await expect(page.locator('.hint')).toContainText('session', { timeout: 15_000 });
-	await page.waitForTimeout(500);
+	// The session list loads asynchronously (thread/list can take seconds once
+	// many sessions accumulate); wait for the sidebar to be fully loaded before
+	// capturing the baseline count.
+	await expect(page.locator('nav.sessions[data-loaded="true"]')).toBeVisible({
+		timeout: 30_000
+	});
 	const sessionsBefore = await page.locator('.session').count();
 
 	// Session A (default working directory via the picker).

@@ -51,6 +51,7 @@
 	let localCounter = 0;
 
 	let sessions = $state<ThreadSummary[]>([]);
+	let sessionsLoaded = $state(false);
 	let threads = $state<Record<string, ThreadState>>({});
 	let input = $state('');
 	let selectedImages = $state<SelectedImage[]>([]);
@@ -354,10 +355,14 @@
 	}
 
 	async function loadSessions() {
-		const res = await fetch('/api/threads');
-		const data = await res.json();
-		sessions = data.data ?? [];
-		defaultCwd = data.defaultCwd ?? '';
+		try {
+			const res = await fetch('/api/threads');
+			const data = await res.json();
+			sessions = data.data ?? [];
+			defaultCwd = data.defaultCwd ?? '';
+		} finally {
+			sessionsLoaded = true;
+		}
 	}
 
 	async function startCreating() {
@@ -427,7 +432,11 @@
 			conflict = null;
 			const thr = data.thread;
 			if (thr?.cwd) cwds[id] = thr.cwd;
-			replaceItems(id, thr?.turns ?? []);
+			// Only sync the transcript when the server actually returned history.
+			// A failed open (e.g. a brand-new thread with no rollout yet) must not
+			// wipe locally rendered items — the response can arrive late, after
+			// the user has already run slash commands in this session.
+			if (thr) replaceItems(id, thr.turns ?? []);
 			// Surface any persisted goal for this session.
 			fetch(`/api/threads/${id}/goal`)
 				.then((r) => r.json())
@@ -995,7 +1004,7 @@
 		{:else}
 			<button class="new" onclick={startCreating}>+ new session</button>
 		{/if}
-		<nav class="sessions">
+		<nav class="sessions" data-loaded={sessionsLoaded}>
 			{#each sessions as s (s.id)}
 				<div class="session-row">
 					<a
