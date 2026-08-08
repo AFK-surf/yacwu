@@ -149,11 +149,14 @@ approval prompt and commands run with full access.
 
 codex keeps an open file descriptor on a session's rollout `.jsonl` for as long
 as the thread is loaded (resumed) — even while idle. Before resuming, the open
-endpoint scans `/proc/*/fd` for any process (outside our own app-server's process
-tree) holding that path; if one exists it returns `409` and the UI shows a
-warning with the offending process so you can cancel or "open anyway". This is
-Linux-only; on platforms without `/proc` it degrades to no detection rather than
-blocking.
+endpoint checks whether any process (outside our own app-server's process tree)
+holds that path open; if one exists it returns `409` and the UI shows a warning
+with the offending process so you can cancel or "open anyway".
+
+The scan is platform-specific: on Linux it reads `/proc/*/fd` symlinks; on
+OpenBSD (which has no `/proc`) it runs `fstat(1)` on the rollout file and
+`ps` for the process tree. Other platforms degrade to no detection rather
+than blocking.
 
 ### Unix socket listening
 
