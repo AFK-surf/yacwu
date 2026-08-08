@@ -46,34 +46,42 @@ fn content_type(path: String) -> String {
 }
 
 /// Serve `url_path` from `root`, falling back to index.html when the path
-/// doesn't name a file (SPA routing).
-pub fn serve(root: String, url_path: String) -> Response(ResponseData) {
+/// doesn't name a file (SPA routing). With `include_body: False` (HEAD
+/// requests) the response carries the same status and headers but no body —
+/// and no file is opened.
+pub fn serve(
+  root: String,
+  url_path: String,
+  include_body include_body: Bool,
+) -> Response(ResponseData) {
   let segments =
     string.split(url_path, "/")
     |> list.filter(fn(s) { s != "" })
   let safe = !list.any(segments, fn(s) { s == ".." || s == "." })
   let file_path = list.fold(segments, root, filepath.join)
   case safe && simplifile.is_file(file_path) == Ok(True) {
-    True -> serve_file(file_path, url_path)
+    True -> serve_file(file_path, url_path, include_body)
     False -> {
       let index = filepath.join(root, "index.html")
       case simplifile.is_file(index) == Ok(True) {
-        True -> serve_file(index, "/index.html")
+        True -> serve_file(index, "/index.html", include_body)
         False ->
-          response.new(404)
-          |> response.set_header("content-type", "text/plain")
-          |> response.set_body(
-            mist.Bytes(bytes_tree.from_string(
-              "web UI build not found — run `bun run build` first",
-            )),
-          )
+          text_404("web UI build not found — run `bun run build` first")
       }
     }
   }
 }
 
-fn serve_file(file_path: String, url_path: String) -> Response(ResponseData) {
-  case mist.send_file(file_path, offset: 0, limit: None) {
+fn serve_file(
+  file_path: String,
+  url_path: String,
+  include_body: Bool,
+) -> Response(ResponseData) {
+  let body = case include_body {
+    True -> mist.send_file(file_path, offset: 0, limit: None)
+    False -> Ok(mist.Bytes(bytes_tree.new()))
+  }
+  case body {
     Ok(body) -> {
       let resp =
         response.new(200)
@@ -89,9 +97,12 @@ fn serve_file(file_path: String, url_path: String) -> Response(ResponseData) {
         False -> resp
       }
     }
-    Error(_) ->
-      response.new(404)
-      |> response.set_header("content-type", "text/plain")
-      |> response.set_body(mist.Bytes(bytes_tree.from_string("not found")))
+    Error(_) -> text_404("not found")
   }
+}
+
+fn text_404(message: String) -> Response(ResponseData) {
+  response.new(404)
+  |> response.set_header("content-type", "text/plain")
+  |> response.set_body(mist.Bytes(bytes_tree.from_string(message)))
 }

@@ -79,11 +79,42 @@ fn monotonic_ms() -> Int {
   erl_monotonic_time(Millisecond)
 }
 
+/// HEAD requests answer like GET — same status and headers, empty body —
+/// mirroring the automatic HEAD handling of the original SvelteKit/Bun stack
+/// (`curl -I`, reverse-proxy health checks, …).
 fn route(ctx: Context, req: Request(Connection)) -> Response(ResponseData) {
+  case req.method {
+    http.Head -> {
+      let resp = dispatch(ctx, request.set_method(req, Get), False)
+      // File and SSE responses are already body-less for HEAD; strip only
+      // buffered byte bodies.
+      case resp.body {
+        mist.Bytes(_) -> response.set_body(resp, mist.Bytes(bytes_tree.new()))
+        _ -> resp
+      }
+    }
+    _ -> dispatch(ctx, req, True)
+  }
+}
+
+fn dispatch(
+  ctx: Context,
+  req: Request(Connection),
+  include_body: Bool,
+) -> Response(ResponseData) {
   case request.path_segments(req), req.method {
-    ["api", "events"], Get -> sse(ctx, req)
+    ["api", "events"], Get ->
+      case include_body {
+        True -> sse(ctx, req)
+        False ->
+          // Advertise the stream without hijacking the socket.
+          response.new(200)
+          |> response.set_header("content-type", "text/event-stream")
+          |> response.set_header("cache-control", "no-cache")
+          |> response.set_body(mist.Bytes(bytes_tree.new()))
+      }
     ["api", "account"], Get -> account(ctx)
-    ["api", "images"], Get -> image(req)
+    ["api", "images"], Get -> image(req, include_body)
     ["api", "threads"], Get -> list_threads(ctx)
     ["api", "threads"], Post -> create_thread(ctx, req)
     ["api", "threads", id, "open"], Post -> open_thread(ctx, req, id)
@@ -102,7 +133,7 @@ fn route(ctx: Context, req: Request(Connection)) -> Response(ResponseData) {
     ["api", "threads", id, "archive"], Post ->
       simple_rpc(ctx, "thread/archive", id)
     ["api", ..], _ -> json_response(404, error_body("not found"))
-    _, Get -> static_files.serve(ctx.static_dir, req.path)
+    _, Get -> static_files.serve(ctx.static_dir, req.path, include_body)
     _, _ -> text_response(404, "not found")
   }
 }
@@ -257,7 +288,10 @@ fn extension_of(path: String) -> String {
   }
 }
 
-fn image(req: Request(Connection)) -> Response(ResponseData) {
+fn image(
+  req: Request(Connection),
+  include_body: Bool,
+) -> Response(ResponseData) {
   let path =
     request.get_query(req)
     |> result.unwrap([])
@@ -274,7 +308,12 @@ fn image(req: Request(Connection)) -> Response(ResponseData) {
         Ok(True) ->
           case list.key_find(image_mime, extension_of(path)) {
             Ok(mime) ->
-              case mist.send_file(path, offset: 0, limit: None) {
+              case
+                case include_body {
+                  True -> mist.send_file(path, offset: 0, limit: None)
+                  False -> Ok(mist.Bytes(bytes_tree.new()))
+                }
+              {
                 Ok(body) ->
                   response.new(200)
                   |> response.set_header("content-type", mime)
