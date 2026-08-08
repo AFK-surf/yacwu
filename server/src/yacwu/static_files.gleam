@@ -83,19 +83,18 @@ fn serve_file(
   }
   case body {
     Ok(body) -> {
-      let resp =
-        response.new(200)
-        |> response.set_header("content-type", content_type(file_path))
-        |> response.set_body(body)
-      case string.starts_with(url_path, immutable_prefix) {
-        True ->
-          response.set_header(
-            resp,
-            "cache-control",
-            "public, max-age=31536000, immutable",
-          )
-        False -> resp
+      // Vite content-hashes everything under /_app/immutable/, so those may
+      // be cached forever. Everything else — the index.html SPA shell,
+      // version.json — must revalidate on every load: a stale shell would
+      // reference hashed bundles that no longer exist after a redeploy.
+      let cache = case string.starts_with(url_path, immutable_prefix) {
+        True -> "public, max-age=31536000, immutable"
+        False -> "no-cache"
       }
+      response.new(200)
+      |> response.set_header("content-type", content_type(file_path))
+      |> response.set_header("cache-control", cache)
+      |> response.set_body(body)
     }
     Error(_) -> text_404("not found")
   }
