@@ -47,7 +47,8 @@ Type these in the composer (anything not starting with `/` is a normal model tur
 ## Requirements
 
 - [Gleam](https://gleam.run) ≥ 1.18 with Erlang/OTP ≥ 27 (and `rebar3` on
-  `PATH` for compiling one transitive Erlang dependency)
+  `PATH` for compiling one transitive Erlang dependency) — `.tool-versions`
+  pins the versions for [asdf](https://asdf-vm.com) users
 - [Bun](https://bun.sh) ≥ 1.3 (builds the web UI)
 - [`codex`](https://developers.openai.com/codex) CLI on `PATH`, already
   authenticated (`codex login`)
