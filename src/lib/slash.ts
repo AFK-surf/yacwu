@@ -1,6 +1,8 @@
 export type SlashCommand =
 	| { kind: 'help' }
 	| { kind: 'status' }
+	| { kind: 'model-show' }
+	| { kind: 'model-set'; model?: string; effort?: string }
 	| { kind: 'goal-show' }
 	| { kind: 'goal-clear' }
 	| { kind: 'goal-set'; objective: string; tokenBudget?: number }
@@ -14,6 +16,9 @@ export type SlashCommand =
 
 const COMMANDS: ReadonlyArray<readonly [string, string]> = [
 	['/status', 'show account, limits & session info'],
+	['/model', 'show the current model and available choices'],
+	['/model <model> [effort]', 'change model and reasoning effort'],
+	['/model --effort <effort>', 'change reasoning effort only'],
 	['/goal <objective>', 'set the thread goal'],
 	['/goal --budget N <goal>', 'set the goal with a token budget'],
 	['/goal', 'show the current goal'],
@@ -49,6 +54,24 @@ function parseGoal(arg: string): SlashCommand {
 	return { kind: 'goal-set', objective: arg };
 }
 
+function parseModel(arg: string): SlashCommand {
+	if (!arg) return { kind: 'model-show' };
+
+	const parts = arg.split(/\s+/);
+	if (parts.length === 2 && parts[0].toLowerCase() === '--effort') {
+		return { kind: 'model-set', effort: parts[1].toLowerCase() };
+	}
+	if (parts.length === 1) return { kind: 'model-set', model: parts[0] };
+	if (parts.length === 2) {
+		return { kind: 'model-set', model: parts[0], effort: parts[1].toLowerCase() };
+	}
+	if (parts.length === 3 && parts[1].toLowerCase() === '--effort') {
+		return { kind: 'model-set', model: parts[0], effort: parts[2].toLowerCase() };
+	}
+
+	return { kind: 'unknown', command: '/model' };
+}
+
 export function parseSlash(text: string): SlashCommand {
 	const trimmed = text.trim();
 	const space = trimmed.search(/\s/);
@@ -61,6 +84,8 @@ export function parseSlash(text: string): SlashCommand {
 			return arg ? { kind: 'unknown', command: cmd } : { kind: 'help' };
 		case '/status':
 			return arg ? { kind: 'unknown', command: cmd } : { kind: 'status' };
+		case '/model':
+			return parseModel(arg);
 		case '/goal':
 			return parseGoal(arg);
 		case '/compact':

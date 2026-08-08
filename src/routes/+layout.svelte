@@ -31,6 +31,19 @@
 		name: string;
 	}
 
+	interface ModelChoice {
+		id: string;
+		displayName: string;
+		defaultEffort: string;
+		efforts: string[];
+	}
+
+	interface ModelState {
+		model: string;
+		effort: string;
+		models: ModelChoice[];
+	}
+
 	type RenderPart =
 		| { type: 'text'; text: string }
 		| { type: 'image'; path: string; source: 'local' | 'remote' };
@@ -549,6 +562,16 @@
 		const cwd = cwds[id] ?? sess?.cwd;
 		if (cwd) lines.push(`  cwd       ${cwd}`);
 		lines.push(`  state     ${t?.status ?? 'idle'}`);
+		try {
+			const res = await fetch(`/api/threads/${id}/model`);
+			const settings = (await res.json()) as Partial<ModelState> & { error?: string };
+			if (!res.ok) throw new Error(settings.error ?? 'model settings unavailable');
+			if (settings.model) lines.push(`  model     ${settings.model}`);
+			if (settings.effort) lines.push(`  effort    ${settings.effort}`);
+		} catch {
+			lines.push('  model     unavailable');
+			lines.push('  effort    unavailable');
+		}
 		if (t?.tokens) lines.push(`  tokens    ${t.tokens.toLocaleString()}`);
 		if (t?.goal) lines.push(`  goal      ${t.goal.objective} (${t.goal.status})`);
 		try {
@@ -566,6 +589,17 @@
 		} catch {
 			lines.push('  (account info unavailable)');
 		}
+		return lines.join('\n');
+	}
+
+	function formatModelState(settings: ModelState): string {
+		const lines = [`model: ${settings.model}`, `effort: ${settings.effort}`, '', 'available models'];
+		for (const model of settings.models) {
+			const efforts = model.efforts.length > 0 ? model.efforts.join(', ') : model.defaultEffort;
+			lines.push(`  ${model.id.padEnd(24)} ${efforts}`);
+		}
+		lines.push('', 'usage: /model <model> [effort]');
+		lines.push('       /model --effort <effort>');
 		return lines.join('\n');
 	}
 
@@ -590,6 +624,34 @@
 			case 'status':
 				addLocalNote(id, await buildStatus(id));
 				break;
+
+			case 'model-show': {
+				try {
+					const res = await fetch(`/api/threads/${id}/model`);
+					const data = await res.json();
+					addLocalNote(
+						id,
+						res.ok ? formatModelState(data as ModelState) : data.error ?? 'failed to read model settings',
+						res.ok ? 'info' : 'err'
+					);
+				} catch {
+					addLocalNote(id, 'failed to read model settings', 'err');
+				}
+				break;
+			}
+
+			case 'model-set': {
+				const { ok, data } = await postCmd(id, 'model', {
+					...(parsed.model ? { model: parsed.model } : {}),
+					...(parsed.effort ? { effort: parsed.effort } : {})
+				});
+				addLocalNote(
+					id,
+					ok ? `model set: ${data.model} · effort ${data.effort}` : data.error ?? 'failed to change model settings',
+					ok ? 'info' : 'err'
+				);
+				break;
+			}
 
 			case 'goal-show': {
 				let g = threads[id]?.goal;

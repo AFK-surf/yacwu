@@ -27,6 +27,8 @@ Type these in the composer (anything not starting with `/` is a normal model tur
 | command | action |
 | --- | --- |
 | `/status` | show account, rate limits & session info |
+| `/model` | show the current model, reasoning effort, and available choices |
+| `/model <model> [effort]` | change the model and optional reasoning effort (`--effort <effort>` changes effort only) |
 | `/goal <objective>` | set the thread goal (`--budget N` to add a token budget) |
 | `/goal` / `/goal clear` | show / clear the current goal |
 | `/compact` | compact conversation history |

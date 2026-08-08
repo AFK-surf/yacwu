@@ -4,6 +4,7 @@ import { extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { codex } from '$lib/server/codex';
+import { getThreadModelOverride } from '$lib/server/threadModel';
 import type { RequestHandler } from './$types';
 
 function imageExtension(file: File): string {
@@ -56,9 +57,11 @@ export const POST: RequestHandler = async ({ params, request }) => {
 
 	if (input.length === 0) return json({ error: 'empty message' }, { status: 400 });
 
+	const settings = getThreadModelOverride(params.id);
 	const result = await codex.request('turn/start', {
 		threadId: params.id,
-		input
+		input,
+		...(settings ? { model: settings.model, effort: settings.effort } : {})
 	});
 	return json(result);
 };

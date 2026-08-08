@@ -257,6 +257,22 @@ test('slash command: /status reports account, limits & session info', async ({ p
 			}
 		});
 	});
+	await page.route('**/api/threads/*/model', async (route) => {
+		await route.fulfill({
+			json: {
+				model: 'gpt-5.4',
+				effort: 'high',
+				models: [
+					{
+						id: 'gpt-5.4',
+						displayName: 'GPT-5.4',
+						defaultEffort: 'medium',
+						efforts: ['low', 'medium', 'high']
+					}
+				]
+			}
+		});
+	});
 
 	await page.goto('/');
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
@@ -268,9 +284,56 @@ test('slash command: /status reports account, limits & session info', async ({ p
 	await page.locator('button.send').click();
 
 	const note = page.locator('.item.note .body').last();
+	await expect(note).toContainText('model     gpt-5.4', { timeout: 15_000 });
+	await expect(note).toContainText('effort    high');
 	await expect(note).toContainText('account   dev@example.com · pro', { timeout: 15_000 });
 	await expect(note).toContainText('5h limit  42% used');
 	await expect(note).toContainText('7d limit  7% used');
+});
+
+test('slash command: /model lists and changes model settings', async ({ page }) => {
+	let current = { model: 'gpt-5.4', effort: 'medium' };
+	let posted: any = null;
+	const models = [
+		{
+			id: 'gpt-5.4',
+			displayName: 'GPT-5.4',
+			defaultEffort: 'medium',
+			efforts: ['low', 'medium', 'high']
+		},
+		{
+			id: 'gpt-5.4-mini',
+			displayName: 'GPT-5.4 mini',
+			defaultEffort: 'low',
+			efforts: ['low', 'medium']
+		}
+	];
+	await page.route('**/api/threads/*/model', async (route) => {
+		if (route.request().method() === 'POST') {
+			posted = route.request().postDataJSON();
+			current = { model: posted.model ?? current.model, effort: posted.effort ?? current.effort };
+		}
+		await route.fulfill({ json: { ...current, models } });
+	});
+
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await expect(page.locator('.composer')).toBeVisible();
+
+	const textarea = page.locator('.composer textarea');
+	await textarea.fill('/model');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note .body').last()).toContainText('model: gpt-5.4');
+	await expect(page.locator('.item.note .body').last()).toContainText('gpt-5.4-mini');
+
+	await textarea.fill('/model gpt-5.4-mini high');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note .body').last()).toContainText(
+		'model set: gpt-5.4-mini · effort high'
+	);
+	expect(posted).toEqual({ model: 'gpt-5.4-mini', effort: 'high' });
 });
 
 test('new transcript output preserves scroll when not at the bottom', async ({ page }) => {
