@@ -508,6 +508,11 @@ fn list_threads(ctx: Context) -> Response(ResponseData) {
       json.object([
         #("limit", json.int(100)),
         #("sortKey", json.string("updated_at")),
+        // Unset (or null) restricts the listing to the *current* provider,
+        // hiding sessions created under profiles with custom providers. An
+        // explicit empty array means "all providers" (per the generated
+        // schema; the prose protocol docs say otherwise).
+        #("modelProviders", json.preprocessed_array([])),
       ]),
     )
   {
