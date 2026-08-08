@@ -19,9 +19,10 @@ export default defineConfig({
 	},
 	projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 	webServer: {
-		command: `bun run dev --port ${port}`,
+		// Build the static SPA, then serve it (and the API) from the Gleam backend.
+		command: `bun run build && cd server && YACWU_STATIC=../build gleam run -- --host 127.0.0.1 --port ${port}`,
 		url: baseURL,
 		reuseExistingServer: true,
-		timeout: 60_000
+		timeout: 120_000
 	}
 });

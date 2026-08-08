@@ -1,0 +1,14 @@
+#!/bin/sh
+# AppImage entry point: runs the Gleam erlang-shipment with the bundled
+# Erlang runtime. The `codex` CLI must be on PATH at runtime.
+set -eu
+
+HERE=$(dirname "$(readlink -f "$0")")
+
+export PATH="$HERE/usr/erlang/bin:$PATH"
+# Bundled non-glibc libraries (libtinfo, …) the Erlang runtime links against.
+export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Serve the bundled web UI unless the user points elsewhere.
+export YACWU_STATIC="${YACWU_STATIC:-$HERE/usr/share/yacwu/build}"
+
+exec "$HERE/usr/share/yacwu/shipment/entrypoint.sh" run "$@"
