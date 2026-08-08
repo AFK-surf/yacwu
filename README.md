@@ -84,6 +84,23 @@ For a deployable artifact, `cd server && gleam export erlang-shipment`
 produces a self-contained BEAM release (needs only Erlang on the target), and
 `bun run build` supplies the static `build/` directory to serve next to it.
 
+## Release tarball
+
+```bash
+./scripts/build-release.sh    # produces dist/yacwu-<version>.tar.gz
+```
+
+Uses the local toolchain (no Docker): the backend becomes a single-file
+escript (`gleam export escript`) bundled with the web UI build and a `yacwu`
+launcher. The result is portable BEAM bytecode — the target machine needs a
+compatible Erlang/OTP (≥ the version pinned in `.tool-versions`) and the
+`codex` CLI, but no Gleam or Bun:
+
+```bash
+tar -xzf yacwu-1.0.0.tar.gz
+./yacwu/yacwu 0.0.0.0:8080
+```
+
 ## AppImage
 
 ```bash
