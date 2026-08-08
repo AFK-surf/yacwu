@@ -65,8 +65,7 @@ pub fn serve(
       let index = filepath.join(root, "index.html")
       case simplifile.is_file(index) == Ok(True) {
         True -> serve_file(index, "/index.html", include_body)
-        False ->
-          text_404("web UI build not found — run `bun run build` first")
+        False -> text_404("web UI build not found — run `bun run build` first")
       }
     }
   }
