@@ -401,6 +401,30 @@ fn thread_rollout_path(ctx: Context, thread_id: String) -> Result(String, Nil) {
   |> result.try(jsonx.field_string(_, ["thread", "path"]))
 }
 
+/// The model/effort supplied by a session's profile, as a fallback layer for
+/// model resolution (empty when the session has no profile).
+fn profile_model_settings(
+  ctx: Context,
+  thread_id: String,
+) -> model_state.Persisted {
+  case
+    resolve_profile(
+      ctx,
+      thread_id,
+      profiles.list_profiles(),
+      thread_rollout_path(ctx, thread_id),
+    )
+  {
+    Ok(profile) ->
+      model_state.Persisted(
+        model: profile.model,
+        effort: jsonx.field_string(profile.config, ["model_reasoning_effort"])
+          |> option.from_result,
+      )
+    Error(_) -> model_state.Persisted(model: None, effort: None)
+  }
+}
+
 fn profile_state_json(
   selected: Result(profiles.Profile, Nil),
   available: List(profiles.Profile),
@@ -1049,7 +1073,14 @@ fn post_goal(
 }
 
 fn get_model(ctx: Context, thread_id: String) -> Response(ResponseData) {
-  case model_state.get_thread_model_state(ctx.codex, ctx.store, thread_id) {
+  case
+    model_state.get_thread_model_state(
+      ctx.codex,
+      ctx.store,
+      thread_id,
+      profile: profile_model_settings(ctx, thread_id),
+    )
+  {
     Ok(state) -> json_response(200, model_state.state_to_json(state))
     Error(message) -> json_response(500, error_body(message))
   }
@@ -1087,6 +1118,7 @@ fn post_model(
           thread_id,
           model,
           effort,
+          profile: profile_model_settings(ctx, thread_id),
         )
       {
         Ok(state) -> json_response(200, model_state.state_to_json(state))

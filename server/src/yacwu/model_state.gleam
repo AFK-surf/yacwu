@@ -272,10 +272,15 @@ pub type ModelState {
   ModelState(settings: Settings, models: List(ModelChoice))
 }
 
+/// Effective model settings for a thread. `profile` carries the session's
+/// selected codex profile settings (if any), which sit between what the
+/// thread itself has persisted and the base config: a profile-created session
+/// must report the profile's model even before its first turn persists it.
 pub fn get_thread_model_state(
   codex: Codex,
   store: Store,
   thread_id: String,
+  profile profile: Persisted,
 ) -> Result(ModelState, String) {
   use catalog <- result.try(list_model_choices(codex))
   case get_override(store, thread_id) {
@@ -303,18 +308,20 @@ pub fn get_thread_model_state(
         Error(_) -> Persisted(None, None)
       }
       let config = configured_settings(codex)
-      let model = case persisted.model, config.model, catalog.default_model {
-        Some(model), _, _ -> Ok(model)
-        None, Some(model), _ -> Ok(model)
-        None, None, Some(model) -> Ok(model)
-        None, None, None -> Error("no models are available")
+      let model = case
+        option.or(persisted.model, option.or(profile.model, config.model))
+      {
+        Some(model) -> Ok(model)
+        None ->
+          option.to_result(catalog.default_model, "no models are available")
       }
       use model <- result.try(model)
       let choice = list.find(catalog.models, fn(c) { c.id == model })
-      let effort = case persisted.effort, config.effort {
-        Some(effort), _ -> effort
-        None, Some(effort) -> effort
-        None, None ->
+      let effort = case
+        option.or(persisted.effort, option.or(profile.effort, config.effort))
+      {
+        Some(effort) -> effort
+        None ->
           choice
           |> result.map(fn(c) { c.default_effort })
           |> result.unwrap("medium")
@@ -330,8 +337,14 @@ pub fn set_thread_model_state(
   thread_id: String,
   requested_model: Option(String),
   requested_effort: Option(String),
+  profile profile: Persisted,
 ) -> Result(ModelState, String) {
-  use current <- result.try(get_thread_model_state(codex, store, thread_id))
+  use current <- result.try(get_thread_model_state(
+    codex,
+    store,
+    thread_id,
+    profile: profile,
+  ))
   let model = option.unwrap(requested_model, current.settings.model)
   use choice <- result.try(
     list.find(current.models, fn(c) { c.id == model })
