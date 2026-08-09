@@ -67,6 +67,14 @@ export interface PlanItem {
 	plan?: Array<{ step: string; status: string }>;
 }
 
+export interface SubAgentActivityItem {
+	type: 'subAgentActivity';
+	id: string;
+	kind: 'started' | 'interacted' | 'interrupted';
+	agentThreadId: string;
+	agentPath: string;
+}
+
 export interface GenericItem {
 	type: string;
 	id: string;
@@ -80,6 +88,7 @@ export type ThreadItem =
 	| CommandExecutionItem
 	| FileChangeItem
 	| PlanItem
+	| SubAgentActivityItem
 	| GenericItem;
 
 export interface Turn {

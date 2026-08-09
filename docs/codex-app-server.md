@@ -1090,6 +1090,7 @@ The fuzzy file search session API emits per-query notifications:
 - `enteredReviewMode` - `{id, review}` sent when the reviewer starts.
 - `exitedReviewMode` - `{id, review}` emitted when the reviewer finishes.
 - `contextCompaction` - `{id}` emitted when Codex compacts the conversation history.
+- `subAgentActivity` - `{id, kind, agentThreadId, agentPath}` tracking sub-agent lifecycle; `kind` is `started`, `interacted`, or `interrupted`.
 
 For `webSearch.action`, the action `type` can be `search` (`query?`, `queries?`), `openPage` (`url?`), or `findInPage` (`url?`, `pattern?`).
 

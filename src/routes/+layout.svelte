@@ -990,6 +990,20 @@
 		return String(path ?? '');
 	}
 
+	function subAgentActivityParts(item: any): { prefix: string; path: string } {
+		const path = item.agentPath ?? item.agentThreadId ?? 'agent';
+		switch (item.kind) {
+			case 'started':
+				return { prefix: 'Started', path };
+			case 'interacted':
+				return { prefix: 'Interacted with', path };
+			case 'interrupted':
+				return { prefix: 'Interrupted', path };
+			default:
+				return { prefix: 'Sub-agent activity:', path };
+		}
+	}
+
 	onMount(() => {
 		const mobileQuery = window.matchMedia('(max-width: 760px)');
 		const updateMobileViewport = () => (mobileViewport = mobileQuery.matches);
@@ -1283,6 +1297,12 @@
 								<div class="item note">
 									<span class="gutter">⤳</span>
 									<div class="body">history compacted</div>
+								</div>
+							{:else if item.type === 'subAgentActivity'}
+								{@const activity = subAgentActivityParts(item)}
+								<div class="item subagent" title={`agent thread ${(item as any).agentThreadId ?? ''}`}>
+									<span class="gutter">⎇</span>
+									<div class="body">{activity.prefix} <span class="agent-path">{activity.path}</span></div>
 								</div>
 							{:else}
 								<div class="item generic">
@@ -1956,6 +1976,15 @@
 		color: var(--fg);
 		border-left: 2px solid var(--accent-dim);
 		padding-left: 10px;
+	}
+	.item.subagent .gutter {
+		color: var(--accent);
+	}
+	.item.subagent .body {
+		color: var(--fg-dim);
+	}
+	.item.subagent .agent-path {
+		color: var(--accent);
 	}
 	.blink {
 		animation: blink 1s step-start infinite;
