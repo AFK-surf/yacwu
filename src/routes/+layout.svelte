@@ -1638,9 +1638,17 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	 * to reveal; absolute paths must sit inside the session's working
 	 * directory.
 	 */
-	function agentPathTarget(text: string): { path: string; line: number | null } | null {
+	function agentPathTarget(
+		text: string,
+		requireSeparator = true
+	): { path: string; line: number | null } | null {
 		if (!activeId) return null;
 		let candidate = text.trim();
+		try {
+			candidate = decodeURIComponent(candidate);
+		} catch {
+			/* not URL-encoded — use as written */
+		}
 		let line: number | null = null;
 		const withLine = candidate.match(/^(.*?):(\d+)(?::\d+)?$/);
 		if (withLine) {
@@ -1654,7 +1662,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		} else if (candidate.startsWith('./')) {
 			candidate = candidate.slice(2);
 		}
-		if (!/^[\w.@+-]+(?:\/[\w.@+-]+)+$/.test(candidate)) return null;
+		// Markdown link hrefs may name a single file; bare code spans need a
+		// separator so ordinary identifiers stay plain.
+		const pattern = requireSeparator
+			? /^[\w.@+-]+(?:\/[\w.@+-]+)+$/
+			: /^[\w.@+-]+(?:\/[\w.@+-]+)*$/;
+		if (!pattern.test(candidate)) return null;
+		// The character class admits dots, so rule out ".."-style segments.
+		if (candidate.split('/').some((segment) => /^\.+$/.test(segment))) return null;
 		return { path: candidate, line };
 	}
 
@@ -1941,12 +1956,24 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			<br />
 		{:else if token.type === 'link'}
 			{#if token.href}
-				<a
-					href={token.href}
-					title={token.title ?? undefined}
-					target={token.external ? '_blank' : undefined}
-					rel={token.external ? 'noreferrer noopener' : undefined}
-				>{@render markdownInlines(token.children)}</a>
+				{@const fileTarget = token.external ? null : agentPathTarget(token.href, false)}
+				{#if fileTarget !== null}
+					<button
+						type="button"
+						class="link-path"
+						title={fileTarget.line
+							? `Open ${fileTarget.path} at line ${fileTarget.line}`
+							: `Open ${fileTarget.path} in file browser`}
+						onclick={() => openFileInBrowser(fileTarget.path, fileTarget.line)}
+					>{@render markdownInlines(token.children)}</button>
+				{:else}
+					<a
+						href={token.href}
+						title={token.title ?? undefined}
+						target={token.external ? '_blank' : undefined}
+						rel={token.external ? 'noreferrer noopener' : undefined}
+					>{@render markdownInlines(token.children)}</a>
+				{/if}
 			{:else}
 				{@render markdownInlines(token.children)}
 			{/if}
@@ -4153,10 +4180,22 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		font-size: var(--text-sm);
 	}
 
-	.markdown-body a {
+	.markdown-body a,
+	.markdown-body .link-path {
 		color: var(--color-accent-active);
+		text-decoration: underline;
 		text-decoration-thickness: var(--rule-hair);
 		text-underline-offset: var(--space-3xs);
+	}
+
+	/* Markdown links that resolve to workspace files open the file browser. */
+	.markdown-body .link-path {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		cursor: pointer;
+		font: inherit;
+		text-align: start;
 	}
 
 	.markdown-image {
