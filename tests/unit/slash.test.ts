@@ -62,3 +62,24 @@ test('/btw carries the question as the first side-conversation message', () => {
 	});
 	expect(parseSlash('/side quick question')).toEqual({ kind: 'btw', message: 'quick question' });
 });
+
+test('SLASH_COMMANDS derives one popup entry per command with arg hints', async () => {
+	const { SLASH_COMMANDS } = await import('../../src/lib/slash');
+	const names = SLASH_COMMANDS.map((c) => c.name);
+	expect(new Set(names).size).toBe(names.length);
+	expect(names[0]).toBe('/status');
+	const model = SLASH_COMMANDS.find((c) => c.name === '/model');
+	expect(model?.args).toBe('<model> [effort]');
+	expect(model?.description).toBe('show the current model and available choices');
+	const goal = SLASH_COMMANDS.find((c) => c.name === '/goal');
+	expect(goal?.args).toBe('<objective>');
+});
+
+test('filterSlashCommands lists all for an empty fragment and prefix-matches otherwise', async () => {
+	const { SLASH_COMMANDS, filterSlashCommands } = await import('../../src/lib/slash');
+	expect(filterSlashCommands('')).toEqual([...SLASH_COMMANDS]);
+	expect(filterSlashCommands('mo').map((c) => c.name)).toEqual(['/model']);
+	expect(filterSlashCommands('f').map((c) => c.name)).toEqual(['/fast', '/fork']);
+	expect(filterSlashCommands('FAST').map((c) => c.name)).toEqual(['/fast']);
+	expect(filterSlashCommands('zzz')).toEqual([]);
+});

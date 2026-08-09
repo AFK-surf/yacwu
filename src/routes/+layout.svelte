@@ -13,7 +13,7 @@
 		type ThreadSummary,
 		type Turn
 	} from '$lib/protocol';
-	import { parseSlash, SLASH_HELP } from '$lib/slash';
+	import { parseSlash, SLASH_HELP, filterSlashCommands, type SlashCommandInfo } from '$lib/slash';
 	import { ComposerHistory } from '$lib/history';
 	import { parseCodexMarkdown, type MarkdownBlock, type MarkdownInline } from '$lib/markdown';
 
@@ -137,6 +137,18 @@
 	const activeParent = $derived(
 		activeIsSide ? (sessions.find((s) => s.id === activeSummary?.forkedFromId) ?? null) : null
 	);
+	// Slash-command autocomplete: offered while the composer holds a bare
+	// command token ("/…" with no whitespace or newline yet), mirroring the
+	// codex TUI's command popup. Esc hides it until the token changes.
+	let slashDismissedToken = $state<string | null>(null);
+	let slashIndex = $state(0);
+	const slashToken = $derived(/^\/\S*$/.test(input) ? input : null);
+	const slashMatches = $derived(
+		slashToken !== null && slashToken !== slashDismissedToken
+			? filterSlashCommands(slashToken.slice(1))
+			: []
+	);
+	const slashPopupVisible = $derived(slashMatches.length > 0);
 	const composerPlaceholder = $derived(
 		mobileViewport ? 'Message Codex' : 'Message Codex…'
 	);
@@ -652,6 +664,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			if (!id) return;
 			// Stale browsing state must not leak across visits to a session.
 			composerHistories.get(id)?.resetNavigation();
+			slashDismissedToken = null;
 			void loadSessionConfig(id);
 			const t = ensureThread(id);
 			if (t.order.length > 0) {
@@ -1239,6 +1252,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	function onKeydown(e: KeyboardEvent) {
+		// The slash popup owns its keys while visible (codex TUI precedence:
+		// command popup before history navigation and submission).
+		if (slashPopupVisible && handleSlashPopupKey(e)) return;
 		// Mobile keyboards use Return for multiline composition; the adjacent
 		// send button stays in thumb reach. Desktop keeps the fast Enter-to-send
 		// convention, with Shift+Enter for a newline.
@@ -1250,6 +1266,64 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.isComposing) {
 			handleHistoryNavigation(e);
 		}
+	}
+
+	function handleSlashPopupKey(e: KeyboardEvent): boolean {
+		if (e.isComposing) return false;
+		const matches = slashMatches;
+		const moveUp = (e.key === 'ArrowUp' && !e.ctrlKey) || (e.key === 'p' && e.ctrlKey);
+		const moveDown = (e.key === 'ArrowDown' && !e.ctrlKey) || (e.key === 'n' && e.ctrlKey);
+		if ((moveUp || moveDown) && !e.altKey && !e.metaKey && !e.shiftKey) {
+			e.preventDefault();
+			slashIndex = (slashIndex + (moveDown ? 1 : -1) + matches.length) % matches.length;
+			void tick().then(() =>
+				document
+					.getElementById(slashOptionId(matches[slashIndex]))
+					?.scrollIntoView({ block: 'nearest' })
+			);
+			return true;
+		}
+		if (e.key === 'Tab' && !e.shiftKey) {
+			e.preventDefault();
+			acceptSlashCompletion(matches[slashIndex], false);
+			return true;
+		}
+		if (e.key === 'Enter' && !e.shiftKey) {
+			// Enter runs the highlighted command, like the codex TUI.
+			e.preventDefault();
+			acceptSlashCompletion(matches[slashIndex], true);
+			return true;
+		}
+		if (e.key === 'Escape') {
+			// Dismiss without touching the draft; the popup stays hidden until
+			// the typed command token changes.
+			e.preventDefault();
+			slashDismissedToken = slashToken;
+			return true;
+		}
+		return false;
+	}
+
+	function slashOptionId(cmd: SlashCommandInfo): string {
+		return `slash-option-${cmd.name.slice(1)}`;
+	}
+
+	function acceptSlashCompletion(cmd: SlashCommandInfo, submit: boolean) {
+		slashDismissedToken = null;
+		// Tab completion leaves a trailing space when the command takes
+		// arguments, so typing continues naturally.
+		input = submit ? cmd.name : cmd.name + (cmd.args ? ' ' : '');
+		if (submit) {
+			void send();
+			return;
+		}
+		void tick().then(() => {
+			if (!composerTextareaEl) return;
+			composerTextareaEl.focus();
+			resizeComposer();
+			const end = composerTextareaEl.value.length;
+			composerTextareaEl.setSelectionRange(end, end);
+		});
 	}
 
 	// Prior user messages for a resumed thread, oldest first — the seed for
@@ -1315,6 +1389,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	$effect(() => {
 		input;
 		void tick().then(resizeComposer);
+	});
+
+	// Selection restarts at the top match whenever the typed token changes.
+	$effect(() => {
+		slashToken;
+		slashIndex = 0;
 	});
 
 	function onCwdKeydown(e: KeyboardEvent) {
@@ -2462,6 +2542,29 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							{/each}
 						</div>
 					{/if}
+					<div class="composer-anchor">
+						{#if slashPopupVisible}
+							<div class="slash-popup" id="slash-popup" role="listbox" aria-label="Slash commands">
+								{#each slashMatches as cmd, i (cmd.name)}
+									<button
+										type="button"
+										class="slash-option"
+										class:selected={i === slashIndex}
+										id={slashOptionId(cmd)}
+										role="option"
+										aria-selected={i === slashIndex}
+										onmousedown={(e) => e.preventDefault()}
+										onclick={() => acceptSlashCompletion(cmd, false)}
+										onpointerenter={() => (slashIndex = i)}
+									>
+										<span class="slash-name">{cmd.name}</span>
+										{#if cmd.args}<span class="slash-args">{cmd.args}</span>{/if}
+										<span class="slash-desc">{cmd.description}</span>
+									</button>
+								{/each}
+							</div>
+						{/if}
+					</div>
 					<div class="composer">
 						<input
 							bind:this={imageInputEl}
@@ -2488,6 +2591,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							autocomplete="off"
 							spellcheck="true"
 							rows="1"
+							role="combobox"
+							aria-autocomplete="list"
+							aria-haspopup="listbox"
+							aria-expanded={slashPopupVisible}
+							aria-controls={slashPopupVisible ? 'slash-popup' : undefined}
+							aria-activedescendant={slashPopupVisible && slashMatches[slashIndex]
+								? slashOptionId(slashMatches[slashIndex])
+								: undefined}
 						></textarea>
 						<button
 							class="send"
@@ -4269,10 +4380,88 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	.composer,
+	.composer-anchor,
 	.attachments,
 	.composer-hint {
 		width: min(100%, var(--measure-reading));
 		margin-inline: auto;
+	}
+
+	/* Zero-height anchor so the slash popup floats above the composer,
+	   overlaying the transcript instead of pushing layout. */
+	.composer-anchor {
+		position: relative;
+		height: 0;
+	}
+
+	.slash-popup {
+		position: absolute;
+		inset-inline: 0;
+		inset-block-end: var(--space-xs);
+		z-index: var(--z-dropdown);
+		display: flex;
+		flex-direction: column;
+		max-height: min(16rem, 40dvh);
+		padding: var(--space-3xs);
+		overflow-y: auto;
+		border: var(--rule-hair) solid var(--color-rule-2);
+		border-radius: var(--radius-input);
+		background: var(--color-paper);
+		box-shadow: var(--shadow-card);
+	}
+
+	.slash-option {
+		display: grid;
+		grid-template-columns: max-content max-content minmax(0, 1fr);
+		gap: var(--space-2xs) var(--space-xs);
+		align-items: baseline;
+		width: 100%;
+		min-height: var(--control-height-compact);
+		padding: var(--space-2xs) var(--space-xs);
+		border: 0;
+		border-inline-start: var(--rule-fine) solid transparent;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--color-neutral);
+		cursor: pointer;
+		font: inherit;
+		text-align: start;
+	}
+
+	.slash-option.selected {
+		border-inline-start-color: var(--color-accent);
+		background: var(--color-paper-3);
+		color: var(--color-ink);
+	}
+
+	.slash-name {
+		color: var(--color-ink-2);
+		font-family: var(--font-outlier);
+		font-size: var(--text-sm);
+		white-space: nowrap;
+	}
+
+	.slash-option.selected .slash-name {
+		color: var(--color-ink);
+	}
+
+	.slash-args {
+		color: var(--color-muted);
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+		white-space: nowrap;
+	}
+
+	.slash-desc {
+		grid-column: 3;
+		justify-self: end;
+		max-width: 100%;
+		overflow: hidden;
+		color: var(--color-muted);
+		font-size: var(--text-xs);
+		text-align: end;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.composer {
@@ -4729,6 +4918,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.attachment,
 		.new-activity,
 		.archive-toast button,
+		.slash-option,
 		.session {
 			min-height: var(--control-height);
 		}

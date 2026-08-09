@@ -5,6 +5,11 @@
  * responsive: pass (34, 49) · icons: pass (30) · mobile: pass (34, 49, 50–57)
  */
 :root {
+	/* The canvas is always light (design.md light-mode policy). "only light"
+	   additionally opts out of Android Chrome's auto-dark page inversion,
+	   which otherwise renders the cream palette as a muddy dark theme. */
+	color-scheme: only light;
+
 	--color-paper: oklch(98% 0.007 88);
 	--color-paper-2: oklch(96% 0.014 82);
 	--color-paper-3: oklch(93% 0.021 78);
