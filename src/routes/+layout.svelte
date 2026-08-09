@@ -2539,9 +2539,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 										type="button"
 										class="raw-toggle"
 										aria-pressed={rawShown}
+										aria-label={rawShown ? 'Show rendered Markdown' : 'Show raw Markdown'}
 										title={rawShown ? 'Show rendered Markdown' : 'Show raw Markdown'}
 										onclick={() => toggleAgentRaw(item)}
-									>{rawShown ? 'Rendered' : 'Raw'}</button>
+									>
+										<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+											{#if rawShown}
+												<path d="M4 7h16M4 12h10M4 17h13" />
+											{:else}
+												<path d="m9 8-4 4 4 4M15 8l4 4-4 4" />
+											{/if}
+										</svg>
+									</button>
 								</div>
 							{:else if item.type === 'reasoning'}
 								{#if reasoningText(item)}
@@ -4011,23 +4020,36 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	/* Quiet per-message control; the transcript stays the artifact. */
 	.raw-toggle {
+		display: grid;
+		place-items: center;
 		justify-self: start;
-		margin-block-start: var(--space-2xs);
-		padding: var(--space-3xs) var(--space-2xs);
-		border: var(--rule-hair) solid var(--color-rule);
+		width: var(--space-md);
+		height: var(--space-md);
+		margin-block-start: var(--space-3xs);
+		padding: 0;
+		border: 0;
 		border-radius: var(--radius-sm);
 		background: transparent;
 		color: var(--color-muted);
 		cursor: pointer;
-		font-size: var(--text-xs);
-		font-weight: 600;
 		transition:
 			background-color var(--dur-micro) var(--ease-out),
-			color var(--dur-micro) var(--ease-out);
+			color var(--dur-micro) var(--ease-out),
+			opacity var(--dur-micro) var(--ease-out);
+	}
+
+	.raw-toggle svg {
+		display: block;
+		width: var(--space-sm);
+		height: var(--space-sm);
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 1.75;
 	}
 
 	.raw-toggle[aria-pressed='true'] {
-		border-color: var(--color-rule-2);
 		background: var(--color-paper-3);
 		color: var(--color-neutral);
 	}
@@ -4959,6 +4981,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			pointer-events: auto;
 		}
 
+		.raw-toggle {
+			opacity: 0;
+			pointer-events: none;
+		}
+
+		.item.agent:hover .raw-toggle,
+		.item.agent:focus-within .raw-toggle,
+		.raw-toggle[aria-pressed='true'] {
+			opacity: 1;
+			pointer-events: auto;
+		}
+
 		.cwd-input:hover,
 		.profile-input:hover {
 			background: var(--color-paper-2);
@@ -5218,7 +5252,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			min-height: var(--control-height);
 		}
 
-		.delete-session {
+		.delete-session,
+		.raw-toggle {
 			width: var(--control-height);
 		}
 	}
