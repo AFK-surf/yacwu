@@ -7,7 +7,8 @@ import yacwu/files
 pub fn sanitize_accepts_simple_relative_paths_test() {
   files.sanitize("") |> should.equal(Ok(""))
   files.sanitize("src") |> should.equal(Ok("src"))
-  files.sanitize("src/lib/protocol.ts") |> should.equal(Ok("src/lib/protocol.ts"))
+  files.sanitize("src/lib/protocol.ts")
+  |> should.equal(Ok("src/lib/protocol.ts"))
 }
 
 pub fn sanitize_normalizes_dot_segments_test() {
