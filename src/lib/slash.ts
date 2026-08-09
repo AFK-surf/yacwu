@@ -44,6 +44,50 @@ const COMMANDS: ReadonlyArray<readonly [string, string]> = [
 
 export const SLASH_HELP = COMMANDS.map(([cmd, desc]) => `${cmd.padEnd(25)}${desc}`).join('\n');
 
+export interface SlashCommandInfo {
+	/** Command token including the leading slash, e.g. "/model". */
+	name: string;
+	/** Argument summary, e.g. "<model> [effort]", or null for none. */
+	args: string | null;
+	description: string;
+}
+
+/**
+ * One popup entry per command, in the presentation order of the help table.
+ * The first usage row supplies the description; the first row with arguments
+ * supplies the argument hint.
+ */
+export const SLASH_COMMANDS: ReadonlyArray<SlashCommandInfo> = (() => {
+	const byName = new Map<string, SlashCommandInfo>();
+	for (const [usage, description] of COMMANDS) {
+		const name = usage.split(/\s+/)[0];
+		const args = usage.slice(name.length).trim() || null;
+		const existing = byName.get(name);
+		if (!existing) byName.set(name, { name, args, description });
+		else if (!existing.args && args) existing.args = args;
+	}
+	return [...byName.values()];
+})();
+
+/**
+ * Commands matching a typed fragment (the text after the slash), mirroring
+ * the Codex TUI's command popup: an empty fragment lists everything in
+ * presentation order; otherwise case-insensitive exact matches rank ahead of
+ * prefix matches.
+ */
+export function filterSlashCommands(fragment: string): SlashCommandInfo[] {
+	const filter = fragment.trim().toLowerCase();
+	if (!filter) return [...SLASH_COMMANDS];
+	const exact: SlashCommandInfo[] = [];
+	const prefix: SlashCommandInfo[] = [];
+	for (const cmd of SLASH_COMMANDS) {
+		const name = cmd.name.slice(1).toLowerCase();
+		if (name === filter) exact.push(cmd);
+		else if (name.startsWith(filter)) prefix.push(cmd);
+	}
+	return [...exact, ...prefix];
+}
+
 function parseGoal(arg: string): SlashCommand {
 	if (!arg) return { kind: 'goal-show' };
 	if (arg.toLowerCase() === 'clear') return { kind: 'goal-clear' };
