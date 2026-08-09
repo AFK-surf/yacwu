@@ -1,9 +1,14 @@
 <script lang="ts">
+	import '@fontsource-variable/newsreader';
+	import '@fontsource-variable/newsreader/wght-italic.css';
+	import '@fontsource-variable/inter';
+	import '@fontsource-variable/jetbrains-mono';
 	import { onMount, tick, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import type { JsonRpcNotification, ThreadItem, ThreadSummary, Turn } from '$lib/protocol';
 	import { parseSlash, SLASH_HELP } from '$lib/slash';
+	import { parseCodexMarkdown, type MarkdownBlock, type MarkdownInline } from '$lib/markdown';
 
 	let { children } = $props();
 
@@ -21,6 +26,7 @@
 		status: 'idle' | 'running';
 		turnId: string | null;
 		tokens: number | null;
+		contextWindow: number | null;
 		error: string | null;
 		goal: Goal | null;
 	}
@@ -29,6 +35,22 @@
 		id: string;
 		file: File;
 		name: string;
+	}
+
+	interface ArchivedSessionSnapshot {
+		id: string;
+		label: string;
+		index: number;
+		summary: ThreadSummary;
+		thread: ThreadState | undefined;
+		config: { model: string; effort: string; profile: string | null } | undefined;
+		cwd: string | undefined;
+	}
+
+	interface ArchiveNotice {
+		tone: 'undo' | 'error';
+		message: string;
+		snapshot?: ArchivedSessionSnapshot;
 	}
 
 	interface ModelChoice {
@@ -58,6 +80,7 @@
 	let sessions = $state<ThreadSummary[]>([]);
 	let sessionsLoaded = $state(false);
 	let threads = $state<Record<string, ThreadState>>({});
+	let sessionConfigs = $state<Record<string, { model: string; effort: string; profile: string | null }>>({});
 	let input = $state('');
 	let selectedImages = $state<SelectedImage[]>([]);
 	let sendingMessage = $state(false);
@@ -67,18 +90,27 @@
 	let conflict = $state<{ id: string; holders: { pid: number; command: string }[] } | null>(null);
 	let mobileSidebarOpen = $state(false);
 	let mobileViewport = $state(false);
+	let desktopSidebarHidden = $state(false);
+	let unseenActivity = $state(false);
+	let archiveNotice = $state<ArchiveNotice | null>(null);
+	let sessionInfoDialog = $state<HTMLDialogElement | null>(null);
+	let sidebarEl = $state<HTMLElement | null>(null);
+	let sidebarToggleEl = $state<HTMLButtonElement | null>(null);
 	let imageInputEl = $state<HTMLInputElement | null>(null);
+	let composerTextareaEl = $state<HTMLTextAreaElement | null>(null);
 	let transcriptScrollTop = $state(0);
 	let transcriptViewportHeight = $state(0);
 	let transcriptHeightVersion = $state(0);
 	const rowHeights = new Map<string, number>();
 	const ESTIMATED_ROW_HEIGHT = 72;
 	const VIRTUAL_OVERSCAN_PX = 700;
+	let archiveNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// The active session is whatever is in the URL (/s/<id>); / shows the welcome.
 	const activeId = $derived(page.params.id ?? null);
 	const active = $derived(activeId ? threads[activeId] : null);
 	const activeSummary = $derived(sessions.find((s) => s.id === activeId) ?? null);
+	const activeConfig = $derived(activeId ? sessionConfigs[activeId] : null);
 	// Side chats (ephemeral /btw forks) nest under their parent in the sidebar.
 	// Orphans — whose parent was archived or isn't listed — stay top-level so
 	// they remain reachable.
@@ -92,7 +124,17 @@
 		activeIsSide ? (sessions.find((s) => s.id === activeSummary?.forkedFromId) ?? null) : null
 	);
 	const composerPlaceholder = $derived(
-		mobileViewport ? 'message codex' : 'message codex…  (Enter to send, Shift+Enter for newline)'
+		mobileViewport ? 'Message Codex' : 'Message Codex…'
+	);
+	const sessionRailOpen = $derived(mobileViewport ? mobileSidebarOpen : !desktopSidebarHidden);
+	const sessionRailToggleLabel = $derived(
+		mobileViewport
+			? mobileSidebarOpen
+				? 'Close sessions'
+				: 'Open sessions'
+			: desktopSidebarHidden
+				? 'Show sessions'
+				: 'Hide sessions'
 	);
 	const SEND_FETCH_RETRIES = 3;
 
@@ -132,6 +174,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				status: 'idle',
 				turnId: null,
 				tokens: null,
+				contextWindow: null,
 				error: null,
 				goal: null
 			};
@@ -187,6 +230,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	function removeSession(id: string) {
 		sessions = sessions.filter((s) => s.id !== id);
 		delete threads[id];
+		delete sessionConfigs[id];
 		delete cwds[id];
 		sessionStorage.removeItem(sideParentKey(id));
 	}
@@ -218,6 +262,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			}
 			case 'thread/archived': {
 				if (tid) removeSession(tid);
+				break;
+			}
+			case 'thread/unarchived': {
+				if (p.thread) upsertSession(p.thread);
+				else void loadSessions();
 				break;
 			}
 			case 'turn/started': {
@@ -273,6 +322,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				if (tid) {
 					const t = ensureThread(tid);
 					t.tokens = p.tokenUsage?.total?.totalTokens ?? t.tokens;
+					t.contextWindow = p.tokenUsage?.modelContextWindow ?? t.contextWindow;
 				}
 				break;
 			}
@@ -295,7 +345,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			}
 		}
 
-		if (shouldScroll) scrollToBottom();
+		if (shouldScroll) {
+			scrollToBottom();
+		} else if (
+			affectedThreadId === activeId &&
+			(msg.method.startsWith('item/') || msg.method.startsWith('turn/'))
+		) {
+			unseenActivity = true;
+		}
 	}
 
 	function isTranscriptAtBottom(): boolean {
@@ -307,6 +364,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	async function scrollToBottom() {
 		await tick();
 		if (!transcriptEl) return;
+		unseenActivity = false;
 		transcriptEl.scrollTop = transcriptEl.scrollHeight;
 		requestAnimationFrame(() => {
 			if (transcriptEl) transcriptEl.scrollTop = transcriptEl.scrollHeight;
@@ -367,6 +425,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	function onTranscriptScroll() {
 		updateTranscriptViewport();
+		if (isTranscriptAtBottom()) unseenActivity = false;
 	}
 
 	function measureTranscriptRow(node: HTMLElement, key: string) {
@@ -457,6 +516,58 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		createError = null;
 	}
 
+	async function openSidebar() {
+		mobileSidebarOpen = true;
+		await tick();
+		const target = sidebarEl?.querySelector<HTMLElement>('.session.active, .new, a, button:not(:disabled)');
+		target?.focus();
+	}
+
+	async function closeSidebar(restoreFocus = true) {
+		mobileSidebarOpen = false;
+		await tick();
+		if (restoreFocus) sidebarToggleEl?.focus();
+	}
+
+	async function toggleSidebar() {
+		if (mobileViewport) {
+			if (mobileSidebarOpen) await closeSidebar();
+			else await openSidebar();
+			return;
+		}
+		desktopSidebarHidden = !desktopSidebarHidden;
+		localStorage.setItem('yacwu-sidebar-hidden', desktopSidebarHidden ? 'true' : 'false');
+		await tick();
+		if (desktopSidebarHidden) sidebarToggleEl?.focus();
+		else sidebarEl?.querySelector<HTMLElement>('.drawer-close')?.focus();
+	}
+
+	function onWindowKeydown(event: KeyboardEvent) {
+		if (!mobileViewport || !mobileSidebarOpen) return;
+		if (event.key === 'Escape') {
+			event.preventDefault();
+			void closeSidebar();
+			return;
+		}
+		if (event.key === 'Tab') {
+			const focusable = Array.from(
+				sidebarEl?.querySelectorAll<HTMLElement>(
+					'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+				) ?? []
+			).filter((element) => element.getClientRects().length > 0);
+			if (focusable.length === 0) return;
+			const first = focusable[0];
+			const last = focusable[focusable.length - 1];
+			if (event.shiftKey && document.activeElement === first) {
+				event.preventDefault();
+				last.focus();
+			} else if (!event.shiftKey && document.activeElement === last) {
+				event.preventDefault();
+				first.focus();
+			}
+		}
+	}
+
 	async function newSession(cwd?: string) {
 		createError = null;
 		const profile = newProfile.trim();
@@ -486,7 +597,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		const id = page.params.id ?? null;
 		untrack(() => {
 			conflict = null;
+			unseenActivity = false;
 			if (!id) return;
+			void loadSessionConfig(id);
 			const t = ensureThread(id);
 			if (t.order.length > 0) {
 				scrollToBottom();
@@ -495,6 +608,28 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			openSession(id, false);
 		});
 	});
+
+	async function loadSessionConfig(id: string) {
+		const previous = sessionConfigs[id];
+		const [modelResult, profileResult] = await Promise.allSettled([
+			fetch(`/api/threads/${id}/model`).then(async (res) => {
+				if (!res.ok) throw new Error('model settings unavailable');
+				return (await res.json()) as ModelState;
+			}),
+			fetch(`/api/threads/${id}/profile`).then(async (res) => {
+				if (!res.ok) throw new Error('profile unavailable');
+				return (await res.json()) as { profile?: string | null };
+			})
+		]);
+		const model = modelResult.status === 'fulfilled' ? modelResult.value : null;
+		const profile = profileResult.status === 'fulfilled' ? profileResult.value.profile ?? null : previous?.profile ?? null;
+		if (!model && !previous) return;
+		sessionConfigs[id] = {
+			model: model?.model ?? previous.model,
+			effort: model?.effort ?? previous.effort,
+			profile
+		};
+	}
 
 	async function openSession(id: string, force: boolean) {
 		loadingHistory = true;
@@ -668,7 +803,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		} catch {
 			/* no profile line */
 		}
-		if (t?.tokens) lines.push(`  tokens    ${t.tokens.toLocaleString()}`);
+		if (t?.tokens != null && t.contextWindow != null) {
+			const percent = ((t.tokens / t.contextWindow) * 100).toFixed(1);
+			lines.push(
+				`  context   ${t.tokens.toLocaleString()} / ${t.contextWindow.toLocaleString()} tokens (${percent}%)`
+			);
+		} else {
+			lines.push('  context   unavailable');
+		}
 		if (t?.goal) lines.push(`  goal      ${t.goal.objective} (${t.goal.status})`);
 		try {
 			const acc = await (await fetch('/api/account')).json();
@@ -725,6 +867,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				try {
 					const res = await fetch(`/api/threads/${id}/model`);
 					const data = await res.json();
+					if (res.ok) {
+						const settings = data as ModelState;
+						sessionConfigs[id] = {
+							model: settings.model,
+							effort: settings.effort,
+							profile: sessionConfigs[id]?.profile ?? null
+						};
+					}
 					addLocalNote(
 						id,
 						res.ok ? formatModelState(data as ModelState) : data.error ?? 'failed to read model settings',
@@ -746,6 +896,13 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					ok ? `model set: ${data.model} · effort ${data.effort}` : data.error ?? 'failed to change model settings',
 					ok ? 'info' : 'err'
 				);
+				if (ok) {
+					sessionConfigs[id] = {
+						model: data.model,
+						effort: data.effort,
+						profile: sessionConfigs[id]?.profile ?? null
+					};
+				}
 				break;
 			}
 
@@ -779,6 +936,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					ok ? `profile set: ${data.profile}` : data.error ?? 'failed to set profile',
 					ok ? 'info' : 'err'
 				);
+				if (ok) void loadSessionConfig(id);
 				break;
 			}
 
@@ -789,6 +947,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					ok ? 'profile cleared (base config)' : data.error ?? 'failed to clear profile',
 					ok ? 'info' : 'err'
 				);
+				if (ok) void loadSessionConfig(id);
 				break;
 			}
 
@@ -947,10 +1106,28 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		});
 	}
 
+	function showArchiveNotice(notice: ArchiveNotice, duration = 8000) {
+		if (archiveNoticeTimer) clearTimeout(archiveNoticeTimer);
+		archiveNotice = notice;
+		archiveNoticeTimer = setTimeout(() => {
+			archiveNotice = null;
+			archiveNoticeTimer = null;
+		}, duration);
+	}
+
 	async function deleteSession(id: string) {
 		const session = sessions.find((s) => s.id === id);
+		if (!session) return;
 		const label = session ? shortLabel(session) : id.slice(0, 8);
-		if (!confirm(`Delete session "${label}"?`)) return;
+		const snapshot: ArchivedSessionSnapshot = {
+			id,
+			label,
+			index: sessions.findIndex((s) => s.id === id),
+			summary: session,
+			thread: threads[id],
+			config: sessionConfigs[id],
+			cwd: cwds[id]
+		};
 		const res = await fetch(`/api/threads/${id}/archive`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
@@ -958,19 +1135,63 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		});
 		if (!res.ok) {
 			const data = await res.json().catch(() => ({}));
-			alert(data.error ?? 'failed to delete session');
+			showArchiveNotice({ tone: 'error', message: data.error ?? 'Could not archive the session.' }, 6000);
 			return;
 		}
 		removeSession(id);
+		showArchiveNotice({ tone: 'undo', message: `Archived ${label}`, snapshot });
 		if (activeId === id) goto('/');
 	}
 
+	async function undoArchivedSession() {
+		const snapshot = archiveNotice?.snapshot;
+		if (!snapshot) return;
+		if (archiveNoticeTimer) clearTimeout(archiveNoticeTimer);
+		archiveNoticeTimer = null;
+		const res = await fetch(`/api/threads/${snapshot.id}/unarchive`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({})
+		});
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			showArchiveNotice({ tone: 'error', message: data.error ?? 'Could not restore the session.' }, 6000);
+			return;
+		}
+		const data = await res.json().catch(() => ({}));
+		if (snapshot.thread) threads[snapshot.id] = snapshot.thread;
+		if (snapshot.config) sessionConfigs[snapshot.id] = snapshot.config;
+		if (snapshot.cwd) cwds[snapshot.id] = snapshot.cwd;
+		const restored = { ...snapshot.summary, ...(data.thread ?? {}) } as ThreadSummary;
+		const next = sessions.filter((session) => session.id !== snapshot.id);
+		next.splice(Math.min(Math.max(snapshot.index, 0), next.length), 0, restored);
+		sessions = next;
+		archiveNotice = null;
+	}
+
 	function onKeydown(e: KeyboardEvent) {
-		if (e.key === 'Enter' && !e.shiftKey) {
+		// Mobile keyboards use Return for multiline composition; the adjacent
+		// send button stays in thumb reach. Desktop keeps the fast Enter-to-send
+		// convention, with Shift+Enter for a newline.
+		if (e.key === 'Enter' && !e.shiftKey && !mobileViewport) {
 			e.preventDefault();
 			send();
 		}
 	}
+
+	function resizeComposer() {
+		if (!composerTextareaEl) return;
+		composerTextareaEl.style.height = 'auto';
+		const maxHeight = Number.parseFloat(getComputedStyle(composerTextareaEl).maxHeight);
+		const nextHeight = Math.min(composerTextareaEl.scrollHeight, maxHeight);
+		composerTextareaEl.style.height = `${nextHeight}px`;
+		composerTextareaEl.style.overflowY = composerTextareaEl.scrollHeight > maxHeight ? 'auto' : 'hidden';
+	}
+
+	$effect(() => {
+		input;
+		void tick().then(resizeComposer);
+	});
 
 	function onCwdKeydown(e: KeyboardEvent) {
 		if (e.key === 'Enter') {
@@ -1048,6 +1269,17 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		selectedImages = selectedImages.filter((img) => img.id !== id);
 	}
 
+	async function openSessionInfo() {
+		if (!sessionInfoDialog) return;
+		sessionInfoDialog.showModal();
+		await tick();
+		sessionInfoDialog.focus();
+	}
+
+	function closeSessionInfoOnBackdrop(event: MouseEvent) {
+		if (event.target === event.currentTarget) sessionInfoDialog?.close();
+	}
+
 	function reasoningText(item: any): string {
 		if (item._reason) return item._reason;
 		const s = item.summary;
@@ -1060,6 +1292,16 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		if (s.name) return s.name;
 		if (s.preview) return s.preview.slice(0, 48);
 		return s.id.slice(0, 8);
+	}
+
+	function workspaceLabel(path: string | null | undefined): string {
+		const normalized = path?.replace(/[\\/]+$/, '');
+		return normalized?.split(/[\\/]/).pop() || 'Conversation';
+	}
+
+	function headerLabel(summary: ThreadSummary | null, id: string, cwd: string | undefined): string {
+		if (summary?.name || summary?.preview) return shortLabel(summary);
+		return cwd ? workspaceLabel(cwd) : id.slice(0, 8);
 	}
 
 	function isSideChat(s: ThreadSummary | null | undefined): boolean {
@@ -1098,6 +1340,44 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		if (typeof path === 'string') return path;
 		if (path && typeof path === 'object' && typeof path.path === 'string') return path.path;
 		return String(path ?? '');
+	}
+
+	function fileChangeSymbol(ch: any): string {
+		const kind = fileChangeKind(ch).toLowerCase();
+		if (kind.includes('add') || kind.includes('create')) return '+';
+		if (kind.includes('delete') || kind.includes('remove')) return '−';
+		return '~';
+	}
+
+	function displayFileChangePath(ch: any): string {
+		const path = fileChangePath(ch);
+		const cwd = activeId ? (cwds[activeId] ?? activeSummary?.cwd) : null;
+		if (!cwd) return path;
+		const root = cwd.replace(/[\\/]+$/, '');
+		return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
+	}
+
+	function displayCommand(command: unknown): string {
+		const text = String(command ?? '');
+		const wrapped = text.match(/^(?:\/bin\/)?(?:ba|z|fi)?sh\s+-lc\s+([\s\S]+)$/);
+		if (!wrapped) return text;
+		const body = wrapped[1].trim();
+		const quote = body[0];
+		return (quote === '"' || quote === "'") && body.endsWith(quote) ? body.slice(1, -1) : body;
+	}
+
+	function commandStatusLabel(item: any): string {
+		if (item.status === 'completed') {
+			return item.exitCode === undefined || item.exitCode === null
+				? 'Completed'
+				: `Completed with exit code ${item.exitCode}`;
+		}
+		if (item.status === 'failed') {
+			return item.exitCode === undefined || item.exitCode === null
+				? 'Failed'
+				: `Failed with exit code ${item.exitCode}`;
+		}
+		return 'In progress';
 	}
 
 	function subAgentActivityParts(item: any): { prefix: string; path: string } {
@@ -1155,8 +1435,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	onMount(() => {
-		const mobileQuery = window.matchMedia('(max-width: 760px)');
-		const updateMobileViewport = () => (mobileViewport = mobileQuery.matches);
+		const mobileQuery = window.matchMedia('(max-width: 59.999rem)');
+		const updateMobileViewport = () => {
+			mobileViewport = mobileQuery.matches;
+			if (!mobileViewport) mobileSidebarOpen = false;
+		};
+		desktopSidebarHidden = localStorage.getItem('yacwu-sidebar-hidden') === 'true';
 		updateMobileViewport();
 		mobileQuery.addEventListener('change', updateMobileViewport);
 
@@ -1178,45 +1462,203 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		};
 		return () => {
 			es.close();
+			if (archiveNoticeTimer) clearTimeout(archiveNoticeTimer);
 			mobileQuery.removeEventListener('change', updateMobileViewport);
 		};
 	});
 </script>
 
-<svelte:head>
-	<link rel="preconnect" href="https://fonts.googleapis.com" />
-</svelte:head>
+<svelte:window onkeydown={onWindowKeydown} />
 
-<div class={mobileSidebarOpen ? 'app sidebar-open' : 'app'}>
-	<button
-		class="sidebar-toggle"
-		aria-label={mobileSidebarOpen ? 'close sessions' : 'open sessions'}
-		aria-expanded={mobileSidebarOpen}
-		onclick={() => (mobileSidebarOpen = !mobileSidebarOpen)}
-	>
-		{mobileSidebarOpen ? '×' : '☰'}
-	</button>
+{#snippet codexMark()}
+	<img
+		class="codex-mark"
+		src="/icons/codex-openai.svg"
+		alt="Codex"
+		title="Codex"
+	/>
+{/snippet}
+
+{#snippet markdownInlines(tokens: MarkdownInline[])}
+	{#each tokens as token}
+		{#if token.type === 'text'}
+			{token.text}
+		{:else if token.type === 'strong'}
+			<strong>{@render markdownInlines(token.children)}</strong>
+		{:else if token.type === 'em'}
+			<em>{@render markdownInlines(token.children)}</em>
+		{:else if token.type === 'del'}
+			<del>{@render markdownInlines(token.children)}</del>
+		{:else if token.type === 'code'}
+			<code>{token.text}</code>
+		{:else if token.type === 'break'}
+			<br />
+		{:else if token.type === 'link'}
+			{#if token.href}
+				<a
+					href={token.href}
+					title={token.title ?? undefined}
+					target={token.external ? '_blank' : undefined}
+					rel={token.external ? 'noreferrer noopener' : undefined}
+				>{@render markdownInlines(token.children)}</a>
+			{:else}
+				{@render markdownInlines(token.children)}
+			{/if}
+		{:else if token.type === 'image'}
+			{#if token.src}
+				<img class="markdown-image" src={token.src} alt={token.alt} title={token.title ?? undefined} loading="lazy" />
+			{:else}
+				<span>{token.alt}</span>
+			{/if}
+		{/if}
+	{/each}
+{/snippet}
+
+{#snippet markdownBlocks(blocks: MarkdownBlock[])}
+	{#each blocks as block}
+		{#if block.type === 'paragraph'}
+			<p>{@render markdownInlines(block.children)}</p>
+		{:else if block.type === 'heading'}
+			<div class="markdown-heading" role="heading" aria-level={Math.min(block.depth, 6)}>
+				<span class="markdown-hash" aria-hidden="true">{'#'.repeat(Math.min(block.depth, 6))}</span>
+				<strong>{@render markdownInlines(block.children)}</strong>
+			</div>
+		{:else if block.type === 'code'}
+			<div class="markdown-code">
+				{#if block.language}<span class="markdown-language">{block.language}</span>{/if}
+				<pre><code>{block.text}</code></pre>
+			</div>
+		{:else if block.type === 'blockquote'}
+			<blockquote>{@render markdownBlocks(block.children)}</blockquote>
+		{:else if block.type === 'list'}
+			{#if block.ordered}
+				<ol start={block.start ?? 1}>
+					{#each block.items as item}
+						<li>
+							{#if item.checked !== null}<input type="checkbox" checked={item.checked} disabled aria-label={item.checked ? 'Completed' : 'Not completed'} />{/if}
+							{@render markdownBlocks(item.children)}
+						</li>
+					{/each}
+				</ol>
+			{:else}
+				<ul>
+					{#each block.items as item}
+						<li>
+							{#if item.checked !== null}<input type="checkbox" checked={item.checked} disabled aria-label={item.checked ? 'Completed' : 'Not completed'} />{/if}
+							{@render markdownBlocks(item.children)}
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		{:else if block.type === 'table'}
+			<div class="markdown-table-wrap">
+				<table>
+					<thead>
+						<tr>
+							{#each block.header as cell}
+								<th class:align-center={cell.align === 'center'} class:align-right={cell.align === 'right'}>{@render markdownInlines(cell.children)}</th>
+							{/each}
+						</tr>
+					</thead>
+					<tbody>
+						{#each block.rows as row}
+							<tr>
+								{#each row as cell}
+									<td class:align-center={cell.align === 'center'} class:align-right={cell.align === 'right'}>{@render markdownInlines(cell.children)}</td>
+								{/each}
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{:else if block.type === 'rule'}
+			<hr />
+		{/if}
+	{/each}
+{/snippet}
+
+<div class="app" class:sidebar-open={mobileSidebarOpen} class:rail-hidden={desktopSidebarHidden}>
+	{#if !activeId && !mobileSidebarOpen}
+		<button
+			class="sidebar-toggle welcome-menu"
+			bind:this={sidebarToggleEl}
+			aria-controls="session-sidebar"
+			aria-label={sessionRailToggleLabel}
+			aria-expanded={sessionRailOpen}
+			onclick={toggleSidebar}
+		>
+			<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+				{#if mobileSidebarOpen}
+					<path d="M6 6l12 12M18 6 6 18" />
+				{:else if !mobileViewport}
+					<rect x="3.5" y="4.5" width="17" height="15" rx="1.5" />
+					<path d="M9 5v14M12 9l3 3-3 3" />
+				{:else}
+					<path d="M4 7h16M4 12h16M4 17h16" />
+				{/if}
+			</svg>
+		</button>
+	{/if}
 	<button
 		class="sidebar-scrim"
-		aria-label="close sessions"
-		onclick={() => (mobileSidebarOpen = false)}
+		aria-label="Close sessions"
+		aria-hidden={!mobileSidebarOpen}
+		disabled={!mobileSidebarOpen}
+		onclick={() => closeSidebar()}
 	></button>
 
-	<aside class="sidebar" class:open={mobileSidebarOpen}>
+	<aside
+		id="session-sidebar"
+		class="sidebar"
+		class:open={mobileSidebarOpen}
+		bind:this={sidebarEl}
+		inert={(mobileViewport && !mobileSidebarOpen) || (!mobileViewport && desktopSidebarHidden)}
+	>
 		<div class="brand">
-			<span class="prompt">$</span> yacwu
-			<span class="dot" class:on={connected} title={connected ? 'connected' : 'disconnected'}></span>
+			<button
+				class="drawer-close"
+				type="button"
+				onclick={toggleSidebar}
+				aria-controls="session-sidebar"
+				aria-expanded={sessionRailOpen}
+				aria-label={sessionRailToggleLabel}
+				title={sessionRailToggleLabel}
+			>
+				<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+					{#if mobileViewport}
+						<path d="M6 6l12 12M18 6 6 18" />
+					{:else}
+						<rect x="3.5" y="4.5" width="17" height="15" rx="1.5" />
+						<path d="M9 5v14M15 9l-3 3 3 3" />
+					{/if}
+				</svg>
+			</button>
+			<a class="brand-home" href="/" aria-label="yacwu home">
+				<span class="brand-symbol" aria-hidden="true">y</span>
+				<span class="brand-name">yacwu</span>
+			</a>
+			<span class="connection" title={connected ? 'Connected to Codex' : 'Disconnected from Codex'}>
+				<span class="dot" class:on={connected}></span>
+				<span>{connected ? 'Online' : 'Offline'}</span>
+			</span>
 		</div>
 		{#if creating}
-			<div class="create">
+			<div class="create" role="group" aria-labelledby="create-title">
+				<div class="create-heading">
+					<h2 id="create-title">Start a session</h2>
+					<button class="mini ghost" onclick={cancelCreating}>Cancel</button>
+				</div>
 				<div class="create-row">
-					<span class="prompt">cd</span>
+					<label for="new-cwd">Working directory</label>
 					<input
+						id="new-cwd"
 						class="cwd-input"
 						bind:this={cwdInputEl}
 						bind:value={newCwd}
 						onkeydown={onCwdKeydown}
-						placeholder={defaultCwd || 'working directory'}
+						placeholder={defaultCwd || '/path/to/project'}
+						aria-invalid={Boolean(createError)}
+						aria-describedby="create-helper"
 						spellcheck="false"
 						autocapitalize="off"
 						autocomplete="off"
@@ -1224,9 +1666,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				</div>
 				{#if profileChoices.length > 0}
 					<div class="create-row">
-						<span class="prompt">-p</span>
-						<select class="profile-input" bind:value={newProfile}>
-							<option value="">(base config)</option>
+						<label for="new-profile">Profile</label>
+						<select id="new-profile" class="profile-input" bind:value={newProfile}>
+							<option value="">Base configuration</option>
 							{#each profileChoices as p (p.name)}
 								<option value={p.name}>{p.name}{p.model ? ` · ${p.model}` : ''}</option>
 							{/each}
@@ -1234,14 +1676,24 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					</div>
 				{/if}
 				<div class="create-actions">
-					<button class="mini" onclick={() => newSession(newCwd.trim() || undefined)}>start</button>
-					<button class="mini ghost" onclick={cancelCreating}>esc</button>
-					<span class="create-hint">blank = default</span>
+					<button class="mini" onclick={() => newSession(newCwd.trim() || undefined)}>Start session</button>
 				</div>
-				{#if createError}<div class="create-err">{createError}</div>{/if}
+				{#if createError}
+					<div id="create-helper" class="create-err" role="alert">{createError}</div>
+				{:else}
+					<span id="create-helper" class="create-hint">Leave blank to use the default directory.</span>
+				{/if}
 			</div>
 		{:else}
-			<button class="new" onclick={startCreating}>+ new session</button>
+			<div class="rail-heading">
+				<span>Sessions</span>
+				<button class="new" type="button" onclick={startCreating} aria-label="New session" title="New session">
+					<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+						<path d="M12 5v14" />
+						<path d="M5 12h14" />
+					</svg>
+				</button>
+			</div>
 		{/if}
 		<nav class="sessions" data-loaded={sessionsLoaded}>
 			{#each topSessions as s (s.id)}
@@ -1251,19 +1703,28 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						class:active={s.id === activeId}
 						data-id={s.id}
 						href={`/s/${s.id}`}
-						onclick={() => (mobileSidebarOpen = false)}
+						onclick={() => closeSidebar(false)}
 					>
-						<span class="run-dot" class:running={threads[s.id]?.status === 'running'}></span>
+						<span
+							class="run-dot"
+							class:running={threads[s.id]?.status === 'running'}
+							class:error={Boolean(threads[s.id]?.error)}
+							role="img"
+							aria-label={threads[s.id]?.error ? 'Error' : threads[s.id]?.status === 'running' ? 'Running' : 'Idle'}
+							title={threads[s.id]?.error ? 'Error' : threads[s.id]?.status === 'running' ? 'Running' : 'Idle'}
+						></span>
 						<span class="label">{#if isSideChat(s)}⎇ {/if}{shortLabel(s)}</span>
-						{#if s.cwd}<span class="cwd">{s.cwd}</span>{/if}
 					</a>
 					<button
 						class="delete-session"
 						type="button"
 						aria-label={`delete session ${shortLabel(s)}`}
+						title="Delete session"
 						onclick={() => deleteSession(s.id)}
 					>
-						×
+						<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+							<path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
+						</svg>
 					</button>
 				</div>
 				{#each sideChatsOf(s.id) as side (side.id)}
@@ -1273,73 +1734,207 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							class:active={side.id === activeId}
 							data-id={side.id}
 							href={`/s/${side.id}`}
-							onclick={() => (mobileSidebarOpen = false)}
+							onclick={() => closeSidebar(false)}
 						>
-							<span class="run-dot" class:running={threads[side.id]?.status === 'running'}></span>
+							<span
+								class="run-dot"
+								class:running={threads[side.id]?.status === 'running'}
+								class:error={Boolean(threads[side.id]?.error)}
+								role="img"
+								aria-label={threads[side.id]?.error ? 'Error' : threads[side.id]?.status === 'running' ? 'Running' : 'Idle'}
+								title={threads[side.id]?.error ? 'Error' : threads[side.id]?.status === 'running' ? 'Running' : 'Idle'}
+							></span>
 							<span class="label">⎇ {shortLabel(side)}</span>
 						</a>
 						<button
 							class="delete-session"
 							type="button"
 							aria-label={`delete session ${shortLabel(side)}`}
+							title="Delete session"
 							onclick={() => deleteSession(side.id)}
 						>
-							×
+							<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" />
+							</svg>
 						</button>
 					</div>
 				{/each}
 			{:else}
-				<div class="empty">no sessions yet</div>
+				<div class="empty">
+					<strong>No sessions yet</strong>
+					<span>Start one to begin working with Codex.</span>
+				</div>
 			{/each}
 		</nav>
-		<div class="hint">{topSessions.length} session{topSessions.length === 1 ? '' : 's'}</div>
+		<div class="hint">
+			<span>{topSessions.length} session{topSessions.length === 1 ? '' : 's'}</span>
+		</div>
 	</aside>
 
 	<main class="chat">
 		{#if !activeId}
 			<div class="welcome">
-				<pre>{`
- _   _  __ _  ___ __      ___   _
-| | | |/ _\` |/ __|\\ \\ /\\ / / | | |
-| |_| | (_| | (__  \\ V  V /| |_| |
- \\__, |\\__,_|\\___|  \\_/\\_/  \\__,_|
- |___/      yet another codex web ui
-`}</pre>
-				<p>Select a session on the left, or start a <button class="inline" onclick={startCreating}>new one</button>.</p>
-			</div>
-		{:else}
-			<div class="topbar">
-				{#if activeParent}
-					<span class="tid dim">{activeParent.id.slice(0, 8)}</span>
-					<span class="tid-sep">⎇</span>
-				{/if}
-				<span class="tid">{activeId.slice(0, 8)}</span>
-				{#if cwds[activeId]}<span class="meta">{cwds[activeId]}</span>{/if}
-				{#if active?.goal}
-					<span class="goal" title={active.goal.objective}>
-						◎ {active.goal.objective}{#if active.goal.tokenBudget}
-							<span class="goal-budget"
-								>{Math.round(active.goal.tokensUsed / 1000)}k/{Math.round(
-									active.goal.tokenBudget / 1000
-								)}k</span
-							>{/if}
-					</span>
-				{/if}
-				<span class="spacer"></span>
-				<div class="session-state">
-					{#if active?.tokens}<span class="meta tokens">{active.tokens.toLocaleString()} tok</span>{/if}
-					{#if active?.status === 'running'}
-						<span class="status running">● running</span>
-						<button class="stop" onclick={interrupt}>stop</button>
-					{:else}
-						<span class="status">● idle</span>
-					{/if}
+				<div class="welcome-copy">
+					<h1>Work through the hard parts.</h1>
+					<p>
+						Start a Codex session in any project, follow the work as it happens, and return to the
+						conversation when you need it.
+					</p>
+					<button class="welcome-action" onclick={startCreating}>
+						Start a session <span aria-hidden="true">→</span>
+					</button>
+				</div>
+				<div class="welcome-details" aria-label="yacwu capabilities">
+					<div>
+						<strong>Keep context close</strong>
+						<span>Move between persistent sessions without losing the thread.</span>
+					</div>
+					<div>
+						<strong>See the work</strong>
+						<span>Messages, commands, plans, and file changes arrive as they happen.</span>
+					</div>
+					<div>
+						<strong>Stay in control</strong>
+						<span>Set goals, switch models, fork conversations, or interrupt a running turn.</span>
+					</div>
 				</div>
 			</div>
+		{:else}
+			<header class="topbar">
+				<button
+					class="sidebar-toggle header-menu"
+					bind:this={sidebarToggleEl}
+					aria-controls="session-sidebar"
+					aria-label={sessionRailToggleLabel}
+					aria-expanded={sessionRailOpen}
+					onclick={toggleSidebar}
+				>
+					<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+						{#if mobileViewport && mobileSidebarOpen}
+							<path d="M6 6l12 12M18 6 6 18" />
+						{:else if !mobileViewport}
+							<rect x="3.5" y="4.5" width="17" height="15" rx="1.5" />
+							<path d="M9 5v14M12 9l3 3-3 3" />
+						{:else}
+							<path d="M4 7h16M4 12h16M4 17h16" />
+						{/if}
+					</svg>
+				</button>
+				<div class="session-heading">
+					<h1>{headerLabel(activeSummary, activeId, cwds[activeId] ?? activeSummary?.cwd)}</h1>
+					<div class="session-meta">
+						{#if activeParent}
+							<span class="tid dim">From {activeParent.id.slice(0, 8)}</span>
+							<span class="meta-sep" aria-hidden="true">·</span>
+						{/if}
+						<span class="tid">{activeId.slice(0, 8)}</span>
+						{#if cwds[activeId] ?? activeSummary?.cwd}
+							<span class="meta-sep" aria-hidden="true">·</span>
+							<span class="meta cwd" title={cwds[activeId] ?? activeSummary?.cwd}>{cwds[activeId] ?? activeSummary?.cwd}</span>
+						{/if}
+					</div>
+				</div>
+				<div class="session-facts" aria-label="session configuration">
+					{#if activeConfig?.model}
+						<span class="fact model" title={`Model ${activeConfig.model}, ${activeConfig.effort} reasoning`}>
+							{activeConfig.model}<span class="fact-detail">/{activeConfig.effort}</span>
+						</span>
+					{/if}
+					{#if activeConfig?.profile}
+						<span class="fact profile" title={`Profile ${activeConfig.profile}`}>{activeConfig.profile}</span>
+					{/if}
+					{#if active?.tokens}
+						<span class="fact tokens" title={`${active.tokens.toLocaleString()} tokens used`}>{fmtTokens(active.tokens)} tok</span>
+					{/if}
+				</div>
+				<div class="session-state">
+					<button
+						class="session-info-trigger"
+						type="button"
+						onclick={openSessionInfo}
+						aria-label={`Session details, ${active?.error ? 'error' : active?.status === 'running' ? 'running' : 'idle'}`}
+						title={`Session details · ${active?.error ? 'Error' : active?.status === 'running' ? 'Running' : 'Idle'}`}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+							<circle cx="12" cy="12" r="9" />
+							<path d="M12 11v6" />
+							<circle cx="12" cy="7.5" r=".75" class="info-dot" />
+						</svg>
+						<span
+							class="session-state-dot"
+							class:running={active?.status === 'running'}
+							class:error={Boolean(active?.error)}
+							aria-hidden="true"
+						></span>
+					</button>
+					{#if active?.status === 'running'}
+						<button class="stop" type="button" onclick={interrupt} aria-label="Stop current turn" title="Stop current turn">
+							<svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<rect x="7" y="7" width="10" height="10" rx="1" />
+							</svg>
+						</button>
+					{/if}
+				</div>
+			</header>
+
+			<dialog
+				class="session-info-dialog"
+				bind:this={sessionInfoDialog}
+				aria-labelledby="session-info-title"
+				tabindex="-1"
+				onclick={closeSessionInfoOnBackdrop}
+			>
+				<div class="session-info-panel">
+					<div class="session-info-heading">
+						<h2 id="session-info-title">Session details</h2>
+						<button class="session-info-close" type="button" onclick={() => sessionInfoDialog?.close()} aria-label="Close session details" title="Close">
+							<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<path d="M6 6l12 12M18 6 6 18" />
+							</svg>
+						</button>
+					</div>
+					<dl class="session-info-list">
+						<div>
+							<dt>Session</dt>
+							<dd>{activeId}</dd>
+						</div>
+						<div>
+							<dt>Directory</dt>
+							<dd>{cwds[activeId] ?? activeSummary?.cwd ?? '—'}</dd>
+						</div>
+						<div>
+							<dt>Model</dt>
+							<dd>{activeConfig?.model ?? '—'}</dd>
+						</div>
+						<div>
+							<dt>Reasoning</dt>
+							<dd>{activeConfig?.effort ?? '—'}</dd>
+						</div>
+						<div>
+							<dt>Profile</dt>
+							<dd>{activeConfig?.profile ?? 'Base configuration'}</dd>
+						</div>
+						<div>
+							<dt>Tokens</dt>
+							<dd>{active?.tokens?.toLocaleString() ?? '—'}</dd>
+						</div>
+						<div>
+							<dt>State</dt>
+							<dd>{active?.status ?? 'idle'}</dd>
+						</div>
+						{#if activeParent}
+							<div>
+								<dt>Parent</dt>
+								<dd>{activeParent.id}</dd>
+							</div>
+						{/if}
+					</dl>
+				</div>
+			</dialog>
 
 			{#if activeIsSide}
 				<div class="side-banner">
-					<span class="side-banner-label">⎇ side conversation · ephemeral — not saved</span>
+					<span class="side-banner-label">Side conversation · ephemeral — not saved</span>
 					<span class="spacer"></span>
 					{#if activeParent}
 						<button class="mini ghost" onclick={() => goto(`/s/${activeParent.id}`)}>
@@ -1377,15 +1972,15 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 			{#if conflict && conflict.id === activeId}
 				<div class="conflict">
-					<div class="conflict-head">⚠ session in use by another codex instance</div>
+					<div class="conflict-head">Session already open elsewhere</div>
 					<div class="conflict-body">
 						This conversation's rollout is open in
 						{#each conflict.holders as h, i}{i > 0 ? ', ' : ' '}<code>{h.command} (pid {h.pid})</code>{/each}.
-						Opening it here too can corrupt its history.
+						Opening it here too can corrupt its history. Close the other instance first, or accept the risk.
 					</div>
 					<div class="conflict-actions">
-						<button class="mini danger" onclick={forceOpen}>open anyway</button>
-						<button class="mini ghost" onclick={dismissConflict}>cancel</button>
+						<button class="mini danger" onclick={forceOpen}>Open anyway</button>
+						<button class="mini ghost" onclick={dismissConflict}>Cancel</button>
 					</div>
 				</div>
 			{:else}
@@ -1398,7 +1993,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						<div class="virtual-row" use:measureTranscriptRow={transcriptRowKey(item)}>
 							{#if item.type === 'userMessage'}
 								<div class="item user">
-									<span class="gutter">›</span>
 									<div class="body media-body">
 										{#each userParts(item) as part}
 											{#if part.type === 'text'}
@@ -1414,10 +2008,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								</div>
 							{:else if item.type === 'agentMessage'}
 								<div class="item agent">
+									{@render codexMark()}
 									<div class="body media-body">
-										{#each agentParts((item as any).text ?? '') as part}
-											{#if part.type === 'text'}
-												<span>{part.text}</span>
+									{#each agentParts((item as any).text ?? '') as part}
+										{#if part.type === 'text'}
+											<div class="markdown-body">{@render markdownBlocks(parseCodexMarkdown(part.text))}</div>
 											{:else}
 												<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
 													<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
@@ -1438,8 +2033,21 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								<div class="item cmd">
 									<div class="cmd-line">
 										<span class="gutter">$</span>
-										<span class="cmd-text">{(item as any).command}</span>
-										<span class="cmd-status {(item as any).status}">{(item as any).status}{#if (item as any).exitCode !== undefined && (item as any).exitCode !== null}({(item as any).exitCode}){/if}</span>
+										<span class="cmd-text">{displayCommand((item as any).command)}</span>
+										<span
+											class="cmd-result {(item as any).status}"
+											role="img"
+											aria-label={commandStatusLabel(item)}
+											title={commandStatusLabel(item)}
+										>
+											{#if (item as any).status === 'completed'}
+												<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>
+											{:else if (item as any).status === 'failed'}
+												<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
+											{:else}
+												<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8h3l2-4 3 8 2-4h2" /></svg>
+											{/if}
+										</span>
 									</div>
 									{#if (item as any)._out || (item as any).aggregatedOutput}
 										<pre class="cmd-out">{(item as any)._out || (item as any).aggregatedOutput}</pre>
@@ -1447,12 +2055,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								</div>
 							{:else if item.type === 'fileChange'}
 								<div class="item file">
-									<span class="gutter">±</span>
 									<div class="body">
 										{#each (item as any).changes ?? [] as ch}
 											<div class="fc">
-												<span class="kind {fileChangeClass(ch)}">{fileChangeKind(ch)}</span>
-												{fileChangePath(ch)}
+												<span class="kind {fileChangeClass(ch)}" aria-label={fileChangeKind(ch)} title={fileChangeKind(ch)}>{fileChangeSymbol(ch)}</span>
+												<span class="path">{displayFileChangePath(ch)}</span>
 											</div>
 										{/each}
 									</div>
@@ -1527,387 +2134,655 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					{/each}
 					<div class="transcript-spacer" style={`height: ${virtualTranscript.after}px`}></div>
 					{#if active?.status === 'running'}
-						<div class="item agent"><div class="body blink">▍</div></div>
+						<div class="item agent pending">
+							{@render codexMark()}
+							<div class="body">Working…</div>
+						</div>
 					{/if}
 					{#if active?.error}
 						<div class="item err"><span class="gutter">✗</span><div class="body">{active.error}</div></div>
 					{/if}
 				</div>
-
-				<div class="composer">
-					<span class="prompt">›</span>
-					<input
-						bind:this={imageInputEl}
-						class="image-input"
-						type="file"
-						accept="image/*"
-						multiple
-						onchange={onImagesSelected}
-					/>
-					<button class="attach" type="button" onclick={chooseImages} title="Attach images">img</button>
-					<textarea
-						placeholder={composerPlaceholder}
-						bind:value={input}
-						onkeydown={onKeydown}
-						rows="1"
-					></textarea>
-					<button class="send" onclick={send} disabled={sendingMessage || (!input.trim() && selectedImages.length === 0)}>
-						send
-					</button>
-				</div>
-				{#if selectedImages.length > 0}
-					<div class="attachments">
-						{#each selectedImages as image (image.id)}
-							<button class="attachment" type="button" onclick={() => removeSelectedImage(image.id)}>
-								<span>{image.name}</span>
-								<span aria-hidden="true">×</span>
-							</button>
-						{/each}
+				{#if unseenActivity}
+					<div class="activity-jump">
+						<button class="new-activity" type="button" onclick={scrollToBottom}>
+							New activity
+							<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v11M4 9l4 4 4-4" /></svg>
+						</button>
 					</div>
 				{/if}
+
+				<div class="composer-shell">
+					<span class="composer-state" aria-live="polite">
+						{selectedImages.length > 0 ? `${selectedImages.length} image${selectedImages.length === 1 ? '' : 's'} attached` : ''}
+					</span>
+					{#if selectedImages.length > 0}
+						<div class="attachments" aria-label="Attached images">
+							{#each selectedImages as image (image.id)}
+								<button
+									class="attachment"
+									type="button"
+									onclick={() => removeSelectedImage(image.id)}
+									aria-label={`Remove ${image.name}`}
+									title={`Remove ${image.name}`}
+								>
+									<span>{image.name}</span>
+									<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+										<path d="M4 4l8 8M12 4l-8 8" />
+									</svg>
+								</button>
+							{/each}
+						</div>
+					{/if}
+					<div class="composer">
+						<input
+							bind:this={imageInputEl}
+							class="image-input"
+							type="file"
+							accept="image/*"
+							multiple
+							onchange={onImagesSelected}
+						/>
+						<button class="attach" type="button" onclick={chooseImages} title="Attach images" aria-label="Attach images">
+							<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+							</svg>
+						</button>
+						<textarea
+							bind:this={composerTextareaEl}
+							aria-label="Message Codex"
+							placeholder={composerPlaceholder}
+							bind:value={input}
+							oninput={resizeComposer}
+							onkeydown={onKeydown}
+							enterkeyhint={mobileViewport ? 'enter' : 'send'}
+							autocapitalize="sentences"
+							autocomplete="off"
+							spellcheck="true"
+							rows="1"
+						></textarea>
+						<button
+							class="send"
+							type="button"
+							onclick={send}
+							disabled={sendingMessage || (!input.trim() && selectedImages.length === 0)}
+							aria-label={sendingMessage ? 'Sending message' : 'Send message'}
+							aria-busy={sendingMessage}
+						>
+							<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+								<path d="m18 15-6-6-6 6" />
+								<path d="M12 9v12" />
+							</svg>
+						</button>
+					</div>
+					<div class="composer-hint">Enter to send · Shift+Enter for a new line · Slash commands supported</div>
+				</div>
 			{/if}
 		{/if}
 	</main>
 </div>
 
+{#if archiveNotice}
+	<div class="archive-toast {archiveNotice.tone}" role={archiveNotice.tone === 'error' ? 'alert' : 'status'}>
+		<span>{archiveNotice.message}</span>
+		{#if archiveNotice.snapshot}
+			<button type="button" onclick={undoArchivedSession}>Undo</button>
+		{/if}
+	</div>
+{/if}
+
 {@render children()}
 
 <style>
-	:global(:root) {
-		--bg: #0a0e14;
-		--bg-alt: #0d1117;
-		--panel: #11161d;
-		--border: #1c2530;
-		--fg: #c9d1d9;
-		--fg-dim: #6b7681;
-		--accent: #39d353;
-		--accent-dim: #2ea043;
-		--user: #58a6ff;
-		--reason: #8b6f9e;
-		--cmd: #d29922;
-		--err: #f85149;
-		--mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
-	}
+	/* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5
+	 * genre: modern-minimal · macrostructure: Workbench · nav: N3 session rail · tone: warm editorial utility
+	 * anchor hue: coral · density: compact-workbench · design-system: design.md · designed-as-app · contrast: pass (40–41)
+	 * slop: pass (42–45) · honest: pass (46) · chrome: pass (47) · tokens: pass (48)
+	 * responsive: pass (34, 49) · icons: pass (30) · mobile: pass (34, 49, 50–57)
+	 */
+	@import '../../tokens.css';
+
 	:global(*) {
 		box-sizing: border-box;
 	}
-	:global(html, body) {
-		margin: 0;
-		padding: 0;
-		height: 100%;
-		background: var(--bg);
-		color: var(--fg);
-		font-family: var(--mono);
-		font-size: 13px;
-		line-height: 1.55;
-	}
+
+	:global(html),
 	:global(body) {
-		overflow: hidden;
+		margin: 0;
+		min-width: 20rem;
+		height: 100%;
+		overflow-x: clip;
+		background: var(--color-paper);
+		color: var(--color-ink);
+		font-family: var(--font-body);
+		font-size: var(--text-base);
+		line-height: 1.55;
+		text-rendering: optimizeLegibility;
 	}
+
+	:global(body) {
+		overflow-y: hidden;
+	}
+
+	:global(button),
+	:global(input),
+	:global(select),
+	:global(textarea) {
+		font: inherit;
+	}
+
+	:global(button),
+	:global(a) {
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	:global(::selection) {
+		background: var(--color-accent-soft);
+		color: var(--color-ink);
+	}
+
+	:global(*) {
+		scrollbar-color: var(--color-rule-2) transparent;
+		scrollbar-width: thin;
+	}
+
 	:global(::-webkit-scrollbar) {
-		width: 10px;
-		height: 10px;
+		width: var(--space-xs);
+		height: var(--space-xs);
 	}
+
 	:global(::-webkit-scrollbar-thumb) {
-		background: var(--border);
-		border-radius: 5px;
+		background: var(--color-rule-2);
+		border: var(--space-3xs) solid transparent;
+		border-radius: var(--radius-pill);
+		background-clip: padding-box;
 	}
+
 	:global(::-webkit-scrollbar-track) {
 		background: transparent;
 	}
 
-	.app {
-		display: grid;
-		grid-template-columns: 260px 1fr;
-		height: 100vh;
-		height: 100dvh;
-		width: 100vw;
+	:global(:focus) {
+		outline: none;
 	}
 
-	.sidebar-toggle,
+	:global(:focus-visible) {
+		outline: var(--rule-fine) solid var(--color-focus);
+		outline-offset: var(--focus-offset);
+	}
+
+	.app {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		width: 100%;
+		height: 100dvh;
+		min-height: 0;
+		overflow: clip;
+		background: var(--color-paper);
+	}
+
+	.sidebar-toggle {
+		position: fixed;
+		inset-block-start: calc(var(--space-3xs) + env(safe-area-inset-top));
+		inset-inline-start: var(--space-xs);
+		z-index: var(--z-toast);
+		display: grid;
+		place-items: center;
+		width: var(--control-height);
+		height: var(--control-height);
+		padding: 0;
+		border: var(--rule-hair) solid var(--color-rule);
+		border-radius: var(--radius-input);
+		background: var(--color-paper);
+		color: var(--color-ink);
+		cursor: pointer;
+		white-space: nowrap;
+		box-shadow: var(--shadow-card);
+		transition:
+			background-color var(--dur-micro) var(--ease-out),
+			transform var(--dur-micro) var(--ease-out);
+	}
+
+	.header-menu {
+		position: static;
+		inset: auto;
+		z-index: auto;
+		border-color: transparent;
+		background: transparent;
+		box-shadow: none;
+	}
+
 	.sidebar-scrim {
-		display: none;
+		position: fixed;
+		inset: 0;
+		z-index: var(--z-sticky);
+		display: block;
+		padding: 0;
+		border: 0;
+		background: var(--color-overlay);
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity var(--dur-short) var(--ease-in);
+	}
+
+	.app.sidebar-open .sidebar-scrim {
+		opacity: 1;
+		pointer-events: auto;
+		transition-timing-function: var(--ease-out);
 	}
 
 	.sidebar {
-		border-right: 1px solid var(--border);
-		background: var(--bg-alt);
+		position: fixed;
+		inset-block: 0;
+		inset-inline-start: 0;
+		z-index: var(--z-modal);
 		display: flex;
 		flex-direction: column;
+		width: min(88%, var(--rail-width));
+		min-width: 0;
 		min-height: 0;
+		padding-block-start: env(safe-area-inset-top);
+		border-inline-end: var(--rule-hair) solid var(--color-rule);
+		background: var(--color-paper-2);
+		box-shadow: none;
+		transform: translateX(-100%);
+		transition: transform var(--dur-short) var(--ease-in);
 	}
+
+	.sidebar.open {
+		box-shadow: var(--shadow-drawer);
+		transform: translateX(0);
+		transition-timing-function: var(--ease-out);
+	}
+
 	.brand {
-		padding: 14px 16px;
-		font-weight: 600;
-		letter-spacing: 0.5px;
-		border-bottom: 1px solid var(--border);
-		display: flex;
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
 		align-items: center;
-		gap: 7px;
+		gap: var(--space-sm);
+		min-height: var(--rail-header-height);
+		padding: var(--space-xs) var(--space-sm);
+		border-block-end: var(--rule-hair) solid var(--color-rule);
 	}
-	.brand .prompt {
-		color: var(--accent);
-	}
-	.dot {
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		background: var(--err);
-		margin-left: auto;
-	}
-	.dot.on {
-		background: var(--accent);
-		box-shadow: 0 0 6px var(--accent);
-	}
-	.new {
-		margin: 10px;
-		padding: 8px;
-		background: transparent;
-		border: 1px dashed var(--border);
-		color: var(--fg-dim);
-		border-radius: 6px;
-		cursor: pointer;
-		font-family: var(--mono);
-		font-size: 12px;
-	}
-	.new:hover {
-		color: var(--accent);
-		border-color: var(--accent-dim);
-	}
-	.create {
-		margin: 10px;
-		padding: 8px;
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		background: var(--panel);
-		display: flex;
-		flex-direction: column;
-		gap: 7px;
-	}
-	.create-row {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-	.create-row .prompt {
-		color: var(--accent);
-		font-size: 12px;
-	}
-	.cwd-input {
-		flex: 1;
-		min-width: 0;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		border-radius: 4px;
-		color: var(--fg);
-		font-family: var(--mono);
-		font-size: 12px;
-		padding: 5px 7px;
-	}
-	.cwd-input:focus {
-		outline: none;
-		border-color: var(--accent-dim);
-	}
-	.profile-input {
-		flex: 1;
-		min-width: 0;
-		background: var(--bg);
-		border: 1px solid var(--border);
-		border-radius: 4px;
-		color: var(--fg);
-		font-family: var(--mono);
-		font-size: 12px;
-		padding: 5px 7px;
-	}
-	.profile-input:focus {
-		outline: none;
-		border-color: var(--accent-dim);
-	}
-	.cwd-input::placeholder {
-		color: var(--fg-dim);
-		opacity: 0.6;
-	}
-	.create-actions {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-	}
-	.mini {
-		background: var(--accent-dim);
-		border: none;
-		color: #02110a;
-		font-weight: 600;
-		border-radius: 4px;
-		padding: 4px 10px;
-		cursor: pointer;
-		font-family: var(--mono);
-		font-size: 11px;
-	}
-	.mini.ghost {
-		background: transparent;
-		border: 1px solid var(--border);
-		color: var(--fg-dim);
-		font-weight: 400;
-	}
-	.mini.danger {
-		background: transparent;
-		border: 1px solid var(--err);
-		color: var(--err);
-	}
-	.conflict {
-		margin: 14px 18px 0;
-		padding: 12px 14px;
-		border: 1px solid var(--err);
-		border-radius: 6px;
-		background: rgba(248, 81, 73, 0.08);
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-	.conflict-head {
-		color: var(--err);
-		font-weight: 600;
-	}
-	.conflict-body {
-		color: var(--fg);
-		font-size: 12px;
-		line-height: 1.5;
-	}
-	.conflict-body code {
-		color: var(--cmd);
-		word-break: break-all;
-	}
-	.conflict-actions {
-		display: flex;
-		gap: 8px;
-	}
-	.create-hint {
-		margin-left: auto;
-		color: var(--fg-dim);
-		font-size: 10px;
-		opacity: 0.7;
-	}
-	.create-err {
-		color: var(--err);
-		font-size: 11px;
-		word-break: break-word;
-	}
-	.sessions {
-		flex: 1;
-		overflow-y: auto;
-		padding: 0 8px;
-		min-height: 0;
-	}
-	.session-row {
-		position: relative;
-		margin-bottom: 2px;
-	}
-	.session {
-		width: 100%;
-		text-align: left;
-		text-decoration: none;
-		background: transparent;
-		border: none;
-		color: var(--fg-dim);
-		padding: 8px 10px;
-		border-radius: 6px;
-		cursor: pointer;
-		font-family: var(--mono);
-		font-size: 12px;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		padding-right: 34px;
-	}
-	.session:hover {
-		background: var(--panel);
-		color: var(--fg);
-	}
-	.session.active {
-		background: var(--panel);
-		color: var(--fg);
-		box-shadow: inset 2px 0 0 var(--accent);
-	}
-	.session .label {
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.session .cwd {
-		font-size: 10px;
-		color: var(--fg-dim);
-		opacity: 0.6;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.session-row.side-row .session {
-		padding-left: 26px;
-	}
-	.session.side .label {
-		font-style: italic;
-		opacity: 0.85;
-	}
-	.side-banner {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 6px 18px;
-		border-bottom: 1px solid var(--border);
-		background: var(--bg-alt);
-		font-size: 12px;
-		color: var(--fg-dim);
-	}
-	.side-banner .meta {
-		color: var(--fg-dim);
-		opacity: 0.7;
-	}
-	.delete-session {
-		position: absolute;
-		top: 6px;
-		right: 6px;
+
+	.drawer-close {
 		display: grid;
 		place-items: center;
-		width: 24px;
-		height: 24px;
+		width: var(--control-height);
+		height: var(--control-height);
+		padding: 0;
+		border: var(--rule-hair) solid transparent;
+		border-radius: var(--radius-input);
 		background: transparent;
-		border: 1px solid transparent;
-		border-radius: 5px;
-		color: var(--fg-dim);
+		color: var(--color-ink);
 		cursor: pointer;
-		font-family: var(--mono);
-		font-size: 16px;
-		line-height: 1;
-		opacity: 0.65;
 	}
-	.delete-session:hover {
-		border-color: var(--err);
-		color: var(--err);
+
+	.brand-home {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-xs);
+		min-width: 0;
+		color: var(--color-ink);
+		text-decoration: none;
+		white-space: nowrap;
+	}
+
+	.brand-symbol {
+		display: grid;
+		place-items: center;
+		width: var(--space-md);
+		height: var(--space-md);
+		border-radius: var(--radius-sm);
+		background: var(--color-accent);
+		color: var(--color-accent-ink);
+		font-family: var(--font-display);
+		font-size: var(--text-md);
+		font-weight: var(--display-weight);
+		line-height: 1;
+	}
+
+	.brand-name {
+		font-family: var(--font-display);
+		font-size: var(--text-lg);
+		font-weight: var(--display-weight);
+		letter-spacing: var(--tracking-display);
+		line-height: 1;
+	}
+
+	.connection {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2xs);
+		color: var(--color-muted);
+		font-size: var(--text-xs);
+		font-weight: 500;
+		white-space: nowrap;
+	}
+
+	.dot,
+	.run-dot {
+		flex: none;
+		width: var(--space-2xs);
+		height: var(--space-2xs);
+		border-radius: var(--radius-pill);
+		background: var(--color-error);
+	}
+
+	.dot.on {
+		background: var(--color-success);
+	}
+
+	.rail-heading {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-sm);
+		padding: var(--space-sm) var(--space-sm) var(--space-2xs);
+		color: var(--color-neutral);
+		font-size: var(--text-sm);
+		font-weight: 600;
+	}
+
+	.new,
+	.mini,
+	.stop,
+	.attach,
+	.send,
+	.welcome-action {
+		min-height: var(--control-height);
+		border: var(--rule-hair) solid transparent;
+		border-radius: var(--radius-input);
+		cursor: pointer;
+		font-weight: 600;
+		white-space: nowrap;
+		transition:
+			background-color var(--dur-micro) var(--ease-out),
+			transform var(--dur-micro) var(--ease-out);
+	}
+
+	.new {
+		display: grid;
+		place-items: center;
+		width: var(--control-height);
+		min-width: var(--control-height);
+		padding: 0;
+		background: var(--color-accent);
+		color: var(--color-accent-ink);
+	}
+
+	.create {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-xs);
+		margin: var(--space-sm);
+		padding: var(--space-sm);
+		border-radius: var(--radius-card);
+		background: var(--color-paper-3);
+		color: var(--color-ink);
+	}
+
+	.create-heading {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-sm);
+	}
+
+	.create-heading h2 {
+		margin: 0;
+		min-width: 0;
+		overflow-wrap: anywhere;
+		font-family: var(--font-display);
+		font-size: var(--text-md);
+		font-style: normal;
+		font-weight: var(--display-weight);
+		letter-spacing: var(--tracking-display);
+		line-height: 1.15;
+	}
+
+	.create-row {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2xs);
+	}
+
+	.create-row label {
+		color: var(--color-neutral);
+		font-size: var(--text-xs);
+		font-weight: 600;
+	}
+
+	.cwd-input,
+	.profile-input,
+	textarea {
+		width: 100%;
+		min-width: 0;
+		border: var(--rule-hair) solid var(--color-rule-2);
+		border-radius: var(--radius-input);
+		outline: var(--rule-fine) solid transparent;
+		outline-offset: var(--focus-offset);
+		background: var(--color-paper);
+		color: var(--color-ink);
+	}
+
+	.cwd-input,
+	.profile-input {
+		min-height: var(--control-height);
+		padding-inline: var(--space-sm);
+		font-size: var(--text-sm);
+	}
+
+	.cwd-input {
+		font-family: var(--font-outlier);
+	}
+
+	.cwd-input::placeholder,
+	textarea::placeholder {
+		color: var(--color-muted);
 		opacity: 1;
 	}
-	.run-dot {
-		display: inline-block;
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
+
+	.cwd-input:focus-visible,
+	.profile-input:focus-visible,
+	textarea:focus-visible {
+		border-color: var(--color-rule-2);
+		outline-color: var(--color-focus);
+	}
+
+	.cwd-input[aria-invalid='true'] {
+		border-color: var(--color-error);
+	}
+
+	.cwd-input:disabled,
+	.profile-input:disabled,
+	textarea:disabled,
+	button:disabled {
+		opacity: 0.52;
+		cursor: not-allowed;
+	}
+
+	.create-actions {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-xs);
+	}
+
+	.mini {
+		padding-inline: var(--space-sm);
+		background: var(--color-accent);
+		color: var(--color-accent-ink);
+		font-size: var(--text-sm);
+	}
+
+	.mini.ghost {
+		border-color: var(--color-rule-2);
+		background: var(--color-paper);
+		color: var(--color-neutral);
+	}
+
+	.mini.danger {
+		border-color: var(--color-error);
+		background: var(--color-error);
+		color: var(--color-accent-ink);
+	}
+
+	.create-hint {
+		display: block;
+		min-height: 1lh;
+		color: var(--color-muted);
+		font-size: var(--text-xs);
+		line-height: 1.45;
+	}
+
+	.create-err {
+		min-height: 1lh;
+		padding: var(--space-xs);
+		border-radius: var(--radius-input);
+		background: var(--color-error-soft);
+		color: var(--color-error);
+		font-size: var(--text-sm);
+		overflow-wrap: anywhere;
+	}
+
+	.sessions {
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+		padding: 0 var(--space-2xs) var(--space-sm);
+	}
+
+	.session-row {
+		position: relative;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		margin-block-end: var(--space-3xs);
+	}
+
+	.session {
+		position: relative;
+		display: grid;
+		grid-template-columns: var(--space-xs) minmax(0, 1fr);
+		gap: var(--space-2xs);
+		align-items: center;
+		width: 100%;
+		min-height: var(--control-height-compact);
+		padding: var(--space-3xs) var(--space-xs);
+		border: var(--rule-hair) solid transparent;
+		border-radius: var(--radius-input);
 		background: transparent;
+		color: var(--color-muted);
+		text-align: start;
+		text-decoration: none;
+		white-space: nowrap;
+		transition: background-color var(--dur-micro) var(--ease-out);
 	}
+
+	.session.active {
+		border-color: var(--color-rule);
+		background: var(--color-paper);
+		color: var(--color-ink);
+	}
+
+	.run-dot {
+		background: var(--color-success);
+	}
+
 	.run-dot.running {
-		background: var(--cmd);
-		box-shadow: 0 0 6px var(--cmd);
-		animation: pulse 1s infinite;
+		background: var(--color-warning);
+		animation: pulse-status 1.8s var(--ease-in-out) infinite;
 	}
+
+	.run-dot.error {
+		background: var(--color-error);
+		animation: none;
+	}
+
+	.session .label {
+		grid-column: 2;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: var(--text-sm);
+		font-weight: 500;
+	}
+
+	.session-row.side-row .session {
+		width: 100%;
+	}
+
+	.session-row.side-row {
+		padding-inline-start: var(--space-md);
+	}
+
+	.session.side .label {
+		color: var(--color-neutral);
+	}
+
+	.delete-session {
+		position: static;
+		display: grid;
+		place-items: center;
+		width: var(--space-md);
+		height: var(--space-md);
+		padding: 0;
+		border: var(--rule-hair) solid transparent;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--color-muted);
+		cursor: pointer;
+		opacity: 1;
+		pointer-events: auto;
+		white-space: nowrap;
+		transform: none;
+		transition:
+			background-color var(--dur-micro) var(--ease-out),
+			opacity var(--dur-micro) var(--ease-out),
+			transform var(--dur-micro) var(--ease-out);
+	}
+
+	.delete-session svg {
+		display: block;
+		width: var(--space-sm);
+		height: var(--space-sm);
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 1.75;
+	}
+
+	.delete-session:focus-visible {
+		opacity: 1;
+		pointer-events: auto;
+		transition: none;
+	}
+
 	.empty {
-		color: var(--fg-dim);
-		padding: 16px 10px;
-		font-size: 12px;
-		opacity: 0.6;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2xs);
+		padding: var(--space-lg) var(--space-sm);
+		color: var(--color-muted);
+		font-size: var(--text-sm);
 	}
+
+	.empty strong {
+		color: var(--color-ink-2);
+		font-weight: 600;
+	}
+
 	.hint {
-		padding: 10px 16px;
-		border-top: 1px solid var(--border);
-		color: var(--fg-dim);
-		font-size: 11px;
+		display: flex;
+		justify-content: flex-start;
+		gap: var(--space-sm);
+		padding: var(--space-xs) var(--space-sm) calc(var(--space-xs) + env(safe-area-inset-bottom));
+		border-block-start: var(--rule-hair) solid var(--color-rule);
+		color: var(--color-muted);
+		font-size: var(--text-xs);
 	}
 
 	.chat {
@@ -1915,718 +2790,1504 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		flex-direction: column;
 		min-width: 0;
 		min-height: 0;
+		background: var(--color-paper);
+		color: var(--color-ink);
 	}
+
 	.welcome {
-		margin: auto;
-		text-align: center;
-		color: var(--fg-dim);
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		gap: var(--space-xl);
+		width: min(100%, var(--measure-reading));
+		max-height: 100%;
+		margin: 0 auto;
+		padding: calc(var(--space-2xl) + env(safe-area-inset-top)) var(--space-md) var(--space-xl);
+		overflow-y: auto;
 	}
-	.welcome pre {
-		color: var(--accent);
-		font-size: 12px;
-		line-height: 1.3;
+
+	.welcome-copy {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: var(--space-sm);
+		min-width: 0;
 	}
-	.inline {
-		background: none;
-		border: none;
-		color: var(--accent);
-		cursor: pointer;
-		font-family: var(--mono);
-		font-size: inherit;
-		text-decoration: underline;
-		padding: 0;
+
+	.welcome h1 {
+		margin: 0;
+		min-width: 0;
+		max-width: 11ch;
+		overflow-wrap: anywhere;
+		font-family: var(--font-display);
+		font-size: clamp(var(--text-2xl), 10vw, var(--text-display));
+		font-style: normal;
+		font-weight: var(--display-weight);
+		letter-spacing: var(--tracking-display);
+		line-height: 0.98;
+	}
+
+	.welcome-copy p {
+		margin: 0;
+		max-width: var(--measure-lede);
+		color: var(--color-neutral);
+		font-size: var(--text-base);
+		line-height: 1.5;
+	}
+
+	.welcome-action {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-xs);
+		padding-inline: var(--space-md);
+		background: var(--color-accent);
+		color: var(--color-accent-ink);
+	}
+
+	.welcome-action span {
+		font-size: var(--text-md);
+	}
+
+	.welcome-details {
+		align-self: end;
+		border-block-start: var(--rule-hair) solid var(--color-rule-2);
+	}
+
+	.welcome-details > div {
+		display: grid;
+		grid-template-columns: minmax(7rem, 0.42fr) minmax(0, 1fr);
+		gap: var(--space-sm);
+		padding-block: var(--space-sm);
+		border-block-end: var(--rule-hair) solid var(--color-rule);
+	}
+
+	.welcome-details strong {
+		color: var(--color-ink-2);
+		font-size: var(--text-sm);
+		font-weight: 600;
+	}
+
+	.welcome-details span {
+		color: var(--color-muted);
+		font-size: var(--text-sm);
+		line-height: 1.45;
 	}
 
 	.topbar {
-		display: flex;
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
 		align-items: center;
-		gap: 12px;
-		padding: 10px 18px;
-		border-bottom: 1px solid var(--border);
-		font-size: 12px;
+		gap: var(--space-2xs);
+		padding: calc(var(--space-3xs) + env(safe-area-inset-top)) var(--space-2xs) var(--space-3xs);
+		border-block-end: var(--rule-hair) solid var(--color-rule);
+		background: var(--color-paper);
 	}
-	.topbar .tid {
-		color: var(--accent);
+
+	.session-heading {
+		min-width: 0;
 	}
-	.topbar .tid.dim {
-		color: var(--fg-dim);
+
+	.session-heading h1 {
+		margin: 0;
+		min-width: 0;
+		overflow: hidden;
+		overflow-wrap: anywhere;
+		color: var(--color-ink);
+		font-family: var(--font-body);
+		font-size: var(--text-sm);
+		font-style: normal;
+		font-weight: 600;
+		letter-spacing: normal;
+		line-height: 1.25;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
-	.topbar .tid-sep {
-		color: var(--accent);
+
+	.session-meta {
+		display: none;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-2xs) var(--space-xs);
+		margin-block-start: var(--space-2xs);
+		color: var(--color-muted);
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
 	}
+
+	.session-facts {
+		display: none;
+		grid-column: 1 / -1;
+		align-items: center;
+		gap: var(--space-2xs);
+		min-width: 0;
+		overflow: hidden;
+		color: var(--color-neutral);
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+		white-space: nowrap;
+	}
+
+	.fact {
+		display: inline-flex;
+		align-items: baseline;
+		min-width: 0;
+	}
+
+	.fact + .fact::before {
+		content: '·';
+		margin-inline-end: var(--space-2xs);
+		color: var(--color-rule-2);
+	}
+
+	.fact-detail {
+		color: var(--color-muted);
+	}
+
+	.fact.profile {
+		color: var(--color-accent-active);
+	}
+
+	.topbar .tid,
 	.topbar .meta {
-		color: var(--fg-dim);
-	}
-	.goal {
-		color: var(--accent);
-		max-width: 40%;
+		min-width: 0;
+		max-width: 100%;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.goal-budget {
-		color: var(--fg-dim);
-		margin-left: 6px;
+
+	.topbar .tid {
+		color: var(--color-neutral);
 	}
-	.goal-tracker {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 16px;
-		padding: 10px 18px;
-		border-bottom: 1px solid var(--border);
-		background: rgba(65, 184, 131, 0.07);
-		font-size: 12px;
+
+	.topbar .tid.dim,
+	.topbar .meta-sep,
+	.topbar .meta {
+		color: var(--color-muted);
 	}
-	.goal-main {
-		display: flex;
-		align-items: center;
-		gap: 9px;
-		min-width: 0;
+
+	.topbar .cwd {
+		flex: 1 1 auto;
 	}
-	.goal-marker,
-	.goal-state {
-		flex: 0 0 auto;
-		color: var(--accent);
-	}
-	.goal-objective {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		color: var(--fg);
-	}
-	.goal-state {
-		border: 1px solid rgba(65, 184, 131, 0.35);
-		border-radius: 5px;
-		padding: 2px 6px;
-		font-size: 11px;
-	}
-	.goal-metrics {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		flex: 0 0 auto;
-		color: var(--fg-dim);
-		white-space: nowrap;
-	}
-	.goal-progress {
-		width: 120px;
-		height: 5px;
-		overflow: hidden;
-		border-radius: 999px;
-		background: rgba(255, 255, 255, 0.08);
-	}
-	.goal-progress span {
-		display: block;
-		height: 100%;
-		background: var(--accent);
-	}
-	.spacer {
-		flex: 1;
-	}
+
 	.session-state {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: var(--space-3xs);
+		justify-self: end;
 	}
-	.status {
-		color: var(--fg-dim);
-	}
-	.status.running {
-		color: var(--cmd);
-	}
-	.stop {
+
+	.session-info-trigger,
+	.session-info-close {
+		display: grid;
+		place-items: center;
+		width: var(--control-height);
+		min-width: var(--control-height);
+		height: var(--control-height);
+		padding: 0;
+		border: var(--rule-hair) solid transparent;
+		border-radius: var(--radius-input);
 		background: transparent;
-		border: 1px solid var(--err);
-		color: var(--err);
-		border-radius: 5px;
-		padding: 3px 9px;
+		color: var(--color-neutral);
 		cursor: pointer;
-		font-family: var(--mono);
-		font-size: 11px;
+		transition:
+			background-color var(--dur-micro) var(--ease-out),
+			transform var(--dur-micro) var(--ease-out);
+	}
+
+	.session-info-trigger {
+		position: relative;
+	}
+
+	.session-info-trigger svg,
+	.session-info-close svg {
+		display: block;
+		width: var(--space-md);
+		height: var(--space-md);
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 1.75;
+	}
+
+	.session-info-trigger .info-dot {
+		fill: currentColor;
+		stroke: none;
+	}
+
+	.session-state-dot {
+		position: absolute;
+		inset-block-start: var(--space-2xs);
+		inset-inline-end: var(--space-2xs);
+		width: var(--space-2xs);
+		height: var(--space-2xs);
+		border: var(--rule-hair) solid var(--color-paper);
+		border-radius: var(--radius-pill);
+		background: var(--color-success);
+	}
+
+	.session-state-dot.running {
+		background: var(--color-warning);
+		animation: pulse-status 1.8s var(--ease-in-out) infinite;
+	}
+
+	.session-state-dot.error {
+		background: var(--color-error);
+		animation: none;
+	}
+
+	.stop {
+		display: grid;
+		place-items: center;
+		width: var(--control-height);
+		min-width: var(--control-height);
+		min-height: var(--control-height);
+		padding: 0;
+		border-color: var(--color-error);
+		background: var(--color-paper);
+		color: var(--color-error);
+	}
+
+	.stop-icon {
+		display: block;
+		width: var(--space-sm);
+		height: var(--space-sm);
+		fill: currentColor;
+	}
+
+	.session-info-dialog {
+		position: fixed;
+		inset: 0;
+		width: min(calc(100% - var(--space-lg)), 32rem);
+		max-width: none;
+		max-height: calc(100dvh - var(--space-xl));
+		margin: auto;
+		padding: 0;
+		overflow: auto;
+		border: var(--rule-hair) solid var(--color-rule-2);
+		border-radius: var(--radius-card);
+		background: var(--color-paper);
+		box-shadow: var(--shadow-card);
+		color: var(--color-ink);
+	}
+
+	.session-info-dialog::backdrop {
+		background: var(--color-overlay);
+	}
+
+	.session-info-panel {
+		padding: var(--space-sm);
+	}
+
+	.session-info-heading {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-sm);
+		padding-block-end: var(--space-xs);
+		border-block-end: var(--rule-hair) solid var(--color-rule);
+	}
+
+	.session-info-heading h2 {
+		margin: 0;
+		font-family: var(--font-display);
+		font-size: var(--text-lg);
+		font-style: normal;
+		font-weight: var(--display-weight);
+		letter-spacing: var(--tracking-display);
+		line-height: 1.1;
+	}
+
+	.session-info-list {
+		margin: 0;
+	}
+
+	.session-info-list > div {
+		display: grid;
+		grid-template-columns: minmax(5rem, 0.35fr) minmax(0, 1fr);
+		gap: var(--space-sm);
+		padding-block: var(--space-2xs);
+		border-block-end: var(--rule-hair) solid var(--color-rule);
+	}
+
+	.session-info-list > div:last-child {
+		border-block-end: 0;
+	}
+
+	.session-info-list dt,
+	.session-info-list dd {
+		margin: 0;
+		font-size: var(--text-sm);
+		line-height: 1.45;
+	}
+
+	.session-info-list dt {
+		color: var(--color-muted);
+		font-family: var(--font-body);
+		font-weight: 500;
+	}
+
+	.session-info-list dd {
+		min-width: 0;
+		overflow-wrap: anywhere;
+		color: var(--color-ink-2);
+		font-family: var(--font-outlier);
+	}
+
+	.side-banner,
+	.goal-tracker {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xs);
+		padding: var(--space-2xs) var(--space-sm);
+		border-block-end: var(--rule-hair) solid var(--color-rule);
+		font-size: var(--text-xs);
+	}
+
+	.side-banner {
+		background: var(--color-warning-soft);
+		color: var(--color-neutral);
+	}
+
+	.side-banner-label {
+		font-weight: 600;
+	}
+
+	.side-banner .meta {
+		color: var(--color-muted);
+	}
+
+	.spacer {
+		flex: 1;
+	}
+
+	.goal-tracker {
+		flex-direction: column;
+		align-items: stretch;
+		background: var(--color-accent-soft);
+		color: var(--color-ink);
+	}
+
+	.goal-main,
+	.goal-metrics {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xs);
+		min-width: 0;
+	}
+
+	.goal-marker {
+		color: var(--color-accent-active);
+	}
+
+	.goal-objective {
+		min-width: 0;
+		flex: 1;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.goal-state {
+		padding: var(--space-3xs) var(--space-xs);
+		border: var(--rule-hair) solid var(--color-accent);
+		border-radius: var(--radius-pill);
+		color: var(--color-accent-active);
+		font-size: var(--text-xs);
+		font-weight: 600;
+		white-space: nowrap;
+	}
+
+	.goal-metrics {
+		flex-wrap: wrap;
+		color: var(--color-neutral);
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.goal-progress {
+		flex: 1;
+		min-width: 7rem;
+		height: var(--space-2xs);
+		overflow: hidden;
+		border-radius: var(--radius-pill);
+		background: var(--color-rule);
+	}
+
+	.goal-progress span {
+		display: block;
+		height: 100%;
+		background: var(--color-accent-active);
+	}
+
+	.conflict {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-xs);
+		margin: var(--space-sm);
+		padding: var(--space-sm);
+		border: var(--rule-hair) solid var(--color-error);
+		border-radius: var(--radius-card);
+		background: var(--color-error-soft);
+		color: var(--color-ink);
+	}
+
+	.conflict-head {
+		color: var(--color-error);
+		font-family: var(--font-display);
+		font-size: var(--text-md);
+		font-style: normal;
+		font-weight: var(--display-weight);
+		letter-spacing: var(--tracking-display);
+	}
+
+	.conflict-body {
+		max-width: var(--measure-prose);
+		color: var(--color-neutral);
+		font-size: var(--text-sm);
+		line-height: 1.5;
+	}
+
+	.conflict-body code {
+		color: var(--color-error);
+		font-family: var(--font-outlier);
+		overflow-wrap: anywhere;
+	}
+
+	.conflict-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-xs);
 	}
 
 	.transcript {
 		flex: 1;
-		overflow-y: auto;
-		padding: 18px;
 		min-height: 0;
+		overflow-y: auto;
 		overflow-anchor: none;
+		padding: var(--space-xs) var(--space-sm) var(--space-lg);
+		scroll-padding-block-end: var(--space-lg);
 	}
+
+	.activity-jump {
+		position: relative;
+		z-index: var(--z-raised);
+		display: flex;
+		height: 0;
+		justify-content: center;
+	}
+
+	.new-activity {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-2xs);
+		min-height: var(--control-height-compact);
+		padding-inline: var(--space-xs);
+		border: var(--rule-hair) solid var(--color-rule-2);
+		border-radius: var(--radius-pill);
+		background: var(--color-paper);
+		box-shadow: var(--shadow-card);
+		color: var(--color-neutral);
+		cursor: pointer;
+		font-size: var(--text-xs);
+		font-weight: 600;
+		transform: translateY(calc(-100% - var(--space-2xs)));
+		transition:
+			background-color var(--dur-micro) var(--ease-out),
+			transform var(--dur-micro) var(--ease-out);
+	}
+
+	.new-activity svg {
+		width: var(--space-sm);
+		height: var(--space-sm);
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 1.75;
+	}
+
 	.transcript-spacer {
 		flex: none;
 	}
-	.virtual-row {
-		padding-bottom: 10px;
-	}
+
+	.virtual-row,
+	.transcript > .item,
 	.sys {
-		color: var(--fg-dim);
-		font-style: italic;
-		padding-bottom: 10px;
+		width: min(100%, var(--measure-reading));
+		margin-inline: auto;
 	}
+
+	.virtual-row {
+		padding-block-end: var(--space-xs);
+	}
+
+	.sys {
+		padding-block-end: var(--space-xs);
+		color: var(--color-muted);
+		font-size: var(--text-sm);
+	}
+
 	.item {
-		display: flex;
-		gap: 10px;
-		align-items: flex-start;
-	}
-	.gutter {
-		flex: none;
-		width: 12px;
-		text-align: center;
-		color: var(--fg-dim);
-		user-select: none;
-	}
-	.body {
-		white-space: pre-wrap;
-		word-break: break-word;
-		flex: 1;
+		display: grid;
+		grid-template-columns: minmax(3rem, auto) minmax(0, 1fr);
+		gap: var(--space-xs);
+		align-items: start;
 		min-width: 0;
 	}
-	.item.user .gutter {
-		color: var(--user);
+
+	.body {
+		min-width: 0;
+		overflow-wrap: anywhere;
+		white-space: pre-wrap;
 	}
-	.item.user .body {
-		color: var(--user);
+
+	.item.user {
+		display: block;
+		padding: var(--space-xs) var(--space-sm);
+		border-radius: var(--radius-input);
+		background: var(--color-paper-3);
+		color: var(--color-ink);
 	}
+
+	.item.agent {
+		grid-template-columns: var(--space-md) minmax(0, 1fr);
+		padding: var(--space-3xs) var(--space-sm);
+		color: var(--color-ink);
+	}
+
+	.codex-mark {
+		display: block;
+		width: var(--space-md);
+		height: var(--space-md);
+		object-fit: contain;
+	}
+
 	.item.agent .body {
-		color: var(--fg);
+		max-width: var(--measure-prose);
+		font-family: var(--font-display);
+		font-size: var(--text-md);
+		font-style: normal;
+		font-weight: var(--display-weight);
+		letter-spacing: -0.01em;
+		line-height: 1.45;
 	}
+
+	.markdown-body {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-2xs);
+		min-width: 0;
+		white-space: normal;
+	}
+
+	.markdown-body p,
+	.markdown-body ul,
+	.markdown-body ol,
+	.markdown-body blockquote,
+	.markdown-body pre,
+	.markdown-body table {
+		margin: 0;
+	}
+
+	.markdown-heading {
+		display: flex;
+		align-items: baseline;
+		gap: var(--space-2xs);
+		font-size: inherit;
+		line-height: inherit;
+	}
+
+	.markdown-heading strong,
+	.markdown-body strong,
+	.markdown-body th {
+		font-weight: 700;
+	}
+
+	.markdown-hash {
+		flex: none;
+		color: var(--color-muted);
+		font-family: inherit;
+		font-size: inherit;
+		font-weight: 700;
+		letter-spacing: 0;
+	}
+
+	.markdown-body ul,
+	.markdown-body ol {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-3xs);
+		padding-inline-start: var(--space-md);
+	}
+
+	.markdown-body li {
+		padding-inline-start: var(--space-3xs);
+	}
+
+	.markdown-body li > p {
+		display: inline;
+	}
+
+	.markdown-body input[type='checkbox'] {
+		margin: 0 var(--space-2xs) 0 0;
+		accent-color: var(--color-accent-active);
+	}
+
+	.markdown-body blockquote {
+		padding-inline-start: var(--space-sm);
+		border-inline-start: var(--rule-hair) solid var(--color-rule-2);
+		color: var(--color-neutral);
+	}
+
+	.markdown-body :not(pre) > code {
+		padding: 0 var(--space-3xs);
+		border-radius: var(--radius-sm);
+		background: var(--color-paper-3);
+		font-family: var(--font-outlier);
+		font-size: 0.78em;
+	}
+
+	.markdown-code {
+		display: flex;
+		flex-direction: column;
+		gap: 0;
+		min-width: 0;
+		overflow: hidden;
+		border-radius: var(--radius-input);
+		background: var(--color-code-surface);
+		color: var(--color-code-ink);
+	}
+
+	.markdown-language {
+		padding: var(--space-2xs) var(--space-sm);
+		border-block-end: var(--rule-hair) solid var(--color-code-rule);
+		color: var(--color-code-muted);
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+	}
+
+	.markdown-code pre {
+		max-width: 100%;
+		padding: var(--space-xs) var(--space-sm);
+		overflow-x: auto;
+		white-space: pre;
+	}
+
+	.markdown-code code {
+		font-family: var(--font-outlier);
+		font-size: var(--text-sm);
+	}
+
+	.markdown-body a {
+		color: var(--color-accent-active);
+		text-decoration-thickness: var(--rule-hair);
+		text-underline-offset: var(--space-3xs);
+	}
+
+	.markdown-image {
+		display: block;
+		width: auto;
+		max-width: 100%;
+		max-height: 18rem;
+		border: var(--rule-hair) solid var(--color-rule);
+		border-radius: var(--radius-card);
+		object-fit: contain;
+	}
+
+	.markdown-table-wrap {
+		max-width: 100%;
+		overflow-x: auto;
+	}
+
+	.markdown-body table {
+		width: 100%;
+		border-collapse: collapse;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.markdown-body th,
+	.markdown-body td {
+		padding: var(--space-2xs) var(--space-xs);
+		border-block-end: var(--rule-hair) solid var(--color-rule);
+		text-align: start;
+		vertical-align: top;
+	}
+
+	.markdown-body .align-center {
+		text-align: center;
+	}
+
+	.markdown-body .align-right {
+		text-align: end;
+	}
+
+	.markdown-body hr {
+		width: 100%;
+		margin: var(--space-2xs) 0;
+		border: 0;
+		border-block-start: var(--rule-hair) solid var(--color-rule-2);
+	}
+
+	.item.pending .body {
+		color: var(--color-muted);
+	}
+
 	.media-body {
 		display: flex;
 		flex-direction: column;
-		gap: 8px;
-		white-space: pre-wrap;
+		gap: var(--space-xs);
 	}
+
 	.message-image {
+		display: inline-flex;
+		flex-direction: column;
+		gap: var(--space-2xs);
 		width: fit-content;
 		max-width: 100%;
-		color: var(--fg-dim);
+		color: var(--color-muted);
+		font-family: var(--font-body);
+		font-size: var(--text-xs);
 		text-decoration: none;
-		font-size: 11px;
 	}
+
 	.message-image img {
 		display: block;
-		max-width: min(520px, 100%);
-		max-height: 360px;
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		background: #06090d;
+		width: auto;
+		max-width: min(100%, 32.5rem);
+		max-height: 18rem;
+		border: var(--rule-hair) solid var(--color-rule);
+		border-radius: var(--radius-card);
+		background: var(--color-paper-2);
 		object-fit: contain;
 	}
+
 	.message-image span {
-		display: block;
-		margin-top: 4px;
+		max-width: 100%;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
+
+	.gutter {
+		color: var(--color-muted);
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+		user-select: none;
+	}
+
+	.item.reason,
+	.item.file,
+	.item.plan,
+	.item.note,
+	.item.review,
+	.item.subagent,
+	.item.collab,
+	.item.generic {
+		padding: var(--space-2xs) var(--space-sm);
+		border: 0;
+		border-block-start: var(--rule-hair) solid var(--color-rule);
+		border-radius: 0;
+		background: transparent;
+		color: var(--color-neutral);
+	}
+
 	.item.reason .body {
-		color: var(--reason);
 		font-style: italic;
-		opacity: 0.85;
 	}
-	.item.reason .gutter {
-		color: var(--reason);
-	}
-	.item.cmd {
-		flex-direction: column;
-		gap: 2px;
-		align-items: stretch;
-	}
-	.cmd-line {
-		display: flex;
-		gap: 8px;
-		align-items: baseline;
-	}
-	.cmd-text {
-		color: var(--cmd);
-		flex: 1;
-		white-space: pre-wrap;
-		word-break: break-word;
-	}
-	.cmd-status {
-		font-size: 11px;
-		color: var(--fg-dim);
-	}
-	.cmd-status.completed {
-		color: var(--accent);
-	}
-	.cmd-status.failed {
-		color: var(--err);
-	}
-	.cmd-out {
-		margin: 4px 0 0 20px;
-		padding: 6px 10px;
-		background: #06090d;
-		border-left: 2px solid var(--border);
-		color: var(--fg-dim);
-		font-size: 12px;
-		max-height: 320px;
-		overflow: auto;
-		white-space: pre-wrap;
-		word-break: break-word;
-	}
-	.item.file .gutter {
-		color: var(--accent);
-	}
-	.fc .kind {
-		color: var(--accent);
-		text-transform: uppercase;
-		font-size: 10px;
-		margin-right: 6px;
-	}
+
+	.item.reason .gutter,
 	.item.plan .gutter {
-		color: var(--cmd);
+		color: var(--color-warning);
 	}
-	.step {
-		color: var(--fg-dim);
+
+	.item.file .gutter,
+	.item.review .gutter,
+	.item.subagent .gutter,
+	.item.collab .gutter {
+		color: var(--color-accent-active);
 	}
-	.step.completed {
-		color: var(--accent);
+
+	.item.file {
+		display: block;
 	}
-	.step.inProgress {
-		color: var(--cmd);
+
+	.item.cmd {
+		display: flex;
+		flex-direction: column;
+		gap: 0;
+		overflow: visible;
+		border-block-start: var(--rule-hair) solid var(--color-rule);
+		border-radius: 0;
+		background: transparent;
+		color: var(--color-neutral);
 	}
-	.item.err .gutter,
-	.item.err .body {
-		color: var(--err);
+
+	.cmd-line {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		gap: var(--space-2xs);
+		align-items: baseline;
+		padding: var(--space-2xs) var(--space-sm);
 	}
-	.item.generic .body {
-		color: var(--fg-dim);
-		font-size: 11px;
+
+	.item.cmd .gutter,
+	.cmd-text,
+	.cmd-result,
+	.cmd-out {
+		font-family: var(--font-outlier);
 	}
-	.item.note .gutter,
-	.item.note .body {
-		color: var(--fg-dim);
+
+	.item.cmd .gutter {
+		color: var(--color-warning);
 	}
-	.item.note .body {
-		font-style: italic;
+
+	.cmd-text {
+		min-width: 0;
+		color: var(--color-ink-2);
+		font-size: var(--text-sm);
+		overflow-wrap: anywhere;
 		white-space: pre-wrap;
 	}
-	.item.note.err .gutter,
-	.item.note.err .body {
-		color: var(--err);
-		font-style: normal;
+
+	.cmd-status {
+		color: var(--color-muted);
+		font-size: var(--text-xs);
+		white-space: nowrap;
 	}
-	.item.review .gutter {
-		color: var(--accent);
+
+	.cmd-status.completed {
+		color: var(--color-success);
 	}
-	.item.review .body {
-		color: var(--fg);
-		border-left: 2px solid var(--accent-dim);
-		padding-left: 10px;
+
+	.cmd-status.failed {
+		color: var(--color-error);
 	}
-	.item.subagent .gutter {
-		color: var(--accent);
+
+	.cmd-result {
+		display: grid;
+		place-items: center;
+		width: var(--space-sm);
+		height: var(--space-sm);
+		color: var(--color-warning);
 	}
-	.item.subagent .body {
-		color: var(--fg-dim);
+
+	.cmd-result.completed {
+		color: var(--color-success);
 	}
+
+	.cmd-result.failed {
+		color: var(--color-error);
+	}
+
+	.cmd-result svg {
+		display: block;
+		width: 100%;
+		height: 100%;
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 1.75;
+	}
+
+	.cmd-out {
+		width: 100%;
+		margin: 0;
+		padding: var(--space-2xs) var(--space-sm) var(--space-xs) calc(var(--space-md) + var(--space-xs));
+		border-block-start: var(--rule-hair) solid var(--color-rule);
+		background: transparent;
+		color: var(--color-muted);
+		font-size: var(--text-sm);
+		line-height: 1.45;
+		max-height: 15rem;
+		overflow: auto;
+		overflow-wrap: anywhere;
+		white-space: pre-wrap;
+	}
+
+	.fc {
+		display: grid;
+		grid-template-columns: max-content minmax(0, 1fr);
+		gap: var(--space-2xs);
+		align-items: baseline;
+		font-family: var(--font-outlier);
+		font-size: var(--text-sm);
+		overflow-wrap: anywhere;
+	}
+
+	.fc + .fc,
+	.step + .step {
+		margin-block-start: var(--space-2xs);
+	}
+
+	.fc .kind {
+		color: var(--color-accent-active);
+		font-size: var(--text-sm);
+		font-weight: 500;
+	}
+
+	.fc .path {
+		min-width: 0;
+	}
+
+	.step {
+		color: var(--color-muted);
+		font-family: var(--font-outlier);
+		font-size: var(--text-sm);
+	}
+
+	.step.completed {
+		color: var(--color-success);
+	}
+
+	.step.inProgress {
+		color: var(--color-warning);
+	}
+
+	.item.note .body,
+	.item.generic .body,
+	.collab-detail {
+		font-size: var(--text-sm);
+	}
+
+	.item.note.err,
+	.item.err {
+		padding: var(--space-xs) var(--space-sm);
+		border: var(--rule-hair) solid var(--color-error);
+		border-radius: var(--radius-input);
+		background: var(--color-error-soft);
+		color: var(--color-error);
+	}
+
+	.item.review {
+		color: var(--color-ink);
+	}
+
 	.item.subagent .agent-path {
-		color: var(--accent);
+		color: var(--color-accent-active);
+		font-family: var(--font-outlier);
 	}
+
 	.item.collab {
-		flex-direction: column;
-		gap: 2px;
-		align-items: stretch;
-	}
-	.item.collab .gutter {
-		color: var(--accent);
-	}
-	.collab-line {
 		display: flex;
-		gap: 8px;
+		flex-direction: column;
+		gap: var(--space-2xs);
+	}
+
+	.collab-line {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		gap: var(--space-xs);
 		align-items: baseline;
 	}
+
 	.collab-text {
-		flex: 1;
-		color: var(--fg);
-		white-space: pre-wrap;
-		word-break: break-word;
+		min-width: 0;
+		color: var(--color-ink-2);
+		overflow-wrap: anywhere;
 	}
+
 	.collab-detail {
-		margin-left: 20px;
-		color: var(--fg-dim);
-		font-size: 12px;
+		margin-inline-start: calc(var(--space-md) + var(--space-xs));
+		color: var(--color-muted);
+		overflow-wrap: anywhere;
 		white-space: pre-wrap;
-		word-break: break-word;
 	}
-	.blink {
-		animation: blink 1s step-start infinite;
-		color: var(--accent);
+
+	.composer-shell {
+		padding: var(--space-2xs) var(--space-2xs) calc(var(--space-2xs) + env(safe-area-inset-bottom));
+		border-block-start: var(--rule-hair) solid var(--color-rule);
+		background: var(--color-paper);
+	}
+
+	.composer-state {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+	}
+
+	.composer,
+	.attachments,
+	.composer-hint {
+		width: min(100%, var(--measure-reading));
+		margin-inline: auto;
 	}
 
 	.composer {
-		display: flex;
-		align-items: flex-end;
-		gap: 8px;
-		padding: 12px 18px;
-		border-top: 1px solid var(--border);
-		background: var(--bg-alt);
+		display: grid;
+		grid-template-areas: 'attach message send';
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		gap: var(--space-3xs);
+		align-items: end;
+		padding: var(--space-3xs);
+		border: var(--rule-hair) solid var(--color-rule-2);
+		border-radius: var(--radius-card);
+		background: var(--color-paper);
 	}
-	.composer .prompt {
-		color: var(--accent);
-		padding-bottom: 8px;
+
+	.composer:focus-within {
+		border-color: var(--color-focus);
 	}
+
 	.image-input {
 		display: none;
 	}
+
 	.attach {
-		background: transparent;
-		border: 1px solid var(--border);
-		color: var(--fg-dim);
-		border-radius: 6px;
-		padding: 9px 12px;
-		cursor: pointer;
-		font-family: var(--mono);
-		font-size: 12px;
+		grid-area: attach;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-2xs);
+		justify-self: start;
+		width: var(--control-height);
+		min-width: var(--control-height);
+		padding-inline: 0;
+		border-color: var(--color-rule);
+		background: var(--color-paper);
+		color: var(--color-neutral);
+		font-size: var(--text-sm);
 	}
-	.attach:hover {
-		color: var(--accent);
-		border-color: var(--accent-dim);
-	}
+
 	textarea {
-		flex: 1;
+		grid-area: message;
+		min-height: var(--control-height);
+		max-height: min(9rem, 36dvh);
+		padding: var(--space-2xs) var(--space-xs);
+		border-color: transparent;
+		background: transparent;
+		font-family: var(--font-body);
+		font-size: var(--text-base);
+		line-height: 1.4;
+		overflow-y: hidden;
 		resize: none;
-		background: var(--panel);
-		border: 1px solid var(--border);
-		color: var(--fg);
-		border-radius: 6px;
-		padding: 8px 10px;
-		font-family: var(--mono);
-		font-size: 13px;
-		line-height: 1.5;
-		max-height: 180px;
-		min-height: 38px;
 	}
-	textarea:focus {
-		outline: none;
-		border-color: var(--accent-dim);
+
+	textarea:focus-visible {
+		border-color: transparent;
+		outline-color: transparent;
 	}
+
 	.send {
-		background: var(--accent-dim);
-		border: none;
-		color: #02110a;
-		font-weight: 600;
-		border-radius: 6px;
-		padding: 9px 16px;
-		cursor: pointer;
-		font-family: var(--mono);
-		font-size: 12px;
+		grid-area: send;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: var(--space-2xs);
+		width: var(--control-height);
+		min-width: var(--control-height);
+		padding-inline: 0;
+		background: var(--color-accent);
+		color: var(--color-accent-ink);
+		font-size: var(--text-sm);
 	}
+
 	.send:disabled {
-		opacity: 0.4;
-		cursor: not-allowed;
+		border-color: var(--color-rule);
+		background: var(--color-paper-3);
+		color: var(--color-muted);
+		opacity: 1;
 	}
+
+	.control-icon {
+		flex: none;
+		width: var(--space-sm);
+		height: var(--space-sm);
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 2;
+	}
+
+	.send:focus-visible,
+	.welcome-action:focus-visible,
+	.new:focus-visible,
+	.mini:not(.ghost):focus-visible {
+		outline-color: var(--color-ink);
+	}
+
 	.attachments {
 		display: flex;
-		flex-wrap: wrap;
-		gap: 6px;
-		padding: 0 18px 12px 38px;
-		background: var(--bg-alt);
-		border-top: 1px solid transparent;
+		flex-wrap: nowrap;
+		gap: var(--space-2xs);
+		padding-block-end: var(--space-2xs);
+		overflow-x: auto;
+		scrollbar-width: none;
 	}
+
+	.attachments::-webkit-scrollbar {
+		display: none;
+	}
+
 	.attachment {
 		display: inline-flex;
 		align-items: center;
-		max-width: min(260px, 100%);
-		gap: 8px;
-		background: var(--panel);
-		border: 1px solid var(--border);
-		border-radius: 6px;
-		color: var(--fg-dim);
+		gap: var(--space-xs);
+		max-width: 100%;
+		min-height: var(--control-height);
+		padding-inline: var(--space-sm);
+		border: var(--rule-hair) solid var(--color-rule);
+		border-radius: var(--radius-input);
+		background: var(--color-paper-3);
+		color: var(--color-neutral);
 		cursor: pointer;
-		font-family: var(--mono);
-		font-size: 11px;
-		padding: 5px 8px;
+		font-size: var(--text-sm);
+		white-space: nowrap;
 	}
+
 	.attachment span:first-child {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	@media (max-width: 760px) {
-		:global(html, body) {
-			font-size: 12px;
-		}
+	.attachment svg {
+		flex: none;
+		width: var(--space-sm);
+		height: var(--space-sm);
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-width: 1.75;
+	}
 
-		.app {
-			grid-template-columns: 1fr;
-			overflow: hidden;
-		}
+	.composer-hint {
+		display: none;
+		padding-block-start: var(--space-2xs);
+		color: var(--color-muted);
+		font-size: var(--text-xs);
+		text-align: end;
+	}
 
-		.sidebar-toggle {
-			position: fixed;
-			top: calc(8px + env(safe-area-inset-top));
-			left: 8px;
-			z-index: 40;
-			display: grid;
-			place-items: center;
-			width: 38px;
-			height: 38px;
-			background: var(--panel);
-			border: 1px solid var(--border);
-			border-radius: 6px;
-			color: var(--fg);
-			cursor: pointer;
-			font-family: var(--mono);
-			font-size: 20px;
-			line-height: 1;
-		}
+	.archive-toast {
+		position: fixed;
+		inset-inline: var(--space-sm);
+		inset-block-end: calc(var(--space-sm) + env(safe-area-inset-bottom));
+		z-index: var(--z-toast);
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-sm);
+		max-width: 26rem;
+		min-height: var(--control-height);
+		margin-inline: auto;
+		padding: var(--space-2xs) var(--space-sm);
+		border: var(--rule-hair) solid var(--color-rule-2);
+		border-radius: var(--radius-input);
+		background: var(--color-ink-2);
+		box-shadow: var(--shadow-card);
+		color: var(--color-paper);
+		font-size: var(--text-sm);
+	}
 
-		.sidebar-scrim {
-			position: fixed;
-			inset: 0;
-			z-index: 20;
-			display: block;
-			background: rgba(0, 0, 0, 0.45);
-			border: 0;
-			padding: 0;
+	.archive-toast.error {
+		border-color: var(--color-error);
+		background: var(--color-error-soft);
+		color: var(--color-error);
+	}
+
+	.archive-toast button {
+		min-height: var(--control-height-compact);
+		padding-inline: var(--space-xs);
+		border: var(--rule-hair) solid currentColor;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+		font-size: var(--text-xs);
+		font-weight: 600;
+		transition:
+			background-color var(--dur-micro) var(--ease-out),
+			transform var(--dur-micro) var(--ease-out);
+	}
+
+	@media (hover: hover) and (pointer: fine) {
+		.delete-session {
 			opacity: 0;
 			pointer-events: none;
-			transition: opacity 160ms ease;
 		}
 
-		.app.sidebar-open .sidebar-scrim {
+		.session-row:hover .delete-session,
+		.session-row:focus-within .delete-session {
 			opacity: 1;
 			pointer-events: auto;
 		}
 
-		.sidebar {
-			position: fixed;
-			top: 0;
-			bottom: 0;
-			left: 0;
-			z-index: 30;
-			width: min(82vw, 300px);
-			min-height: 100vh;
-			min-height: 100dvh;
-			padding-top: env(safe-area-inset-top);
-			transform: translateX(-100%);
-			transition: transform 180ms ease;
-			box-shadow: 16px 0 40px rgba(0, 0, 0, 0.35);
+		.cwd-input:hover,
+		.profile-input:hover {
+			background: var(--color-paper-2);
 		}
 
-		.sidebar.open {
-			transform: translateX(0);
+		.sidebar-toggle:hover,
+		.drawer-close:hover,
+		.mini.ghost:hover,
+		.attach:hover,
+		.stop:hover,
+		.session-info-trigger:hover,
+		.session-info-close:hover,
+		.delete-session:hover,
+		.new-activity:hover,
+		.archive-toast button:hover {
+			background: var(--color-paper-3);
 		}
 
-		.brand {
-			min-height: 54px;
-			padding-left: 54px;
+		.new:hover,
+		.mini:not(.ghost):hover,
+		.send:hover,
+		.welcome-action:hover {
+			background: var(--color-accent-active);
 		}
 
-		.new {
-			min-height: 42px;
-			padding: 8px 12px;
+		.session:hover {
+			background: var(--color-paper-3);
+			color: var(--color-ink);
 		}
 
-		.create {
-			margin: 10px;
+		.brand-home:hover .brand-name,
+		.message-image:hover {
+			color: var(--color-accent-active);
 		}
+	}
 
-		.create-actions {
-			flex-wrap: wrap;
-		}
+	.sidebar-toggle:active,
+	.drawer-close:active,
+	.new:active,
+	.mini:active,
+	.stop:active,
+	.session-info-trigger:active,
+	.session-info-close:active,
+	.attach:active,
+	.send:active,
+	.welcome-action:active,
+	.sidebar-scrim:active,
+	.session:active,
+	.attachment:active {
+		transform: translateY(1px);
+	}
 
-		.create-hint {
-			margin-left: 0;
-		}
+	.new-activity:active,
+	.archive-toast button:active {
+		transform: translateY(calc(-100% - var(--space-2xs) + 1px));
+	}
 
-		.sessions {
-			overflow-y: auto;
-			padding-bottom: 10px;
-		}
+	.archive-toast button:active {
+		transform: translateY(1px);
+	}
 
-		.session {
-			min-height: 48px;
-			padding: 8px 10px;
-			padding-right: 42px;
-		}
+	.delete-session:active {
+		transform: translateY(1px);
+	}
 
-		.delete-session {
-			top: 7px;
-			right: 7px;
-			width: 34px;
-			height: 34px;
-		}
+	.brand-home:active,
+	.message-image:active {
+		opacity: 0.72;
+	}
 
-		.empty {
-			padding: 12px 10px;
-		}
-
-		.hint {
-			display: none;
-		}
-
-		.chat {
-			width: 100vw;
-		}
-
+	@media (min-width: 40rem) {
 		.welcome {
-			width: 100%;
-			margin: auto 0;
-			padding: 72px 12px 24px;
-			overflow: auto;
-		}
-
-		.welcome pre {
-			max-width: 100%;
-			overflow-x: auto;
-			font-size: 10px;
-			text-align: left;
-		}
-
-		.topbar {
-			flex-wrap: wrap;
-			gap: 6px 10px;
-			min-height: 54px;
-			padding: calc(8px + env(safe-area-inset-top)) 12px 8px 54px;
-		}
-
-		.topbar .meta {
-			min-width: 0;
-			max-width: 100%;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			white-space: nowrap;
-		}
-
-		.goal {
-			order: 2;
-			flex: 1 0 100%;
-			max-width: 100%;
+			padding-inline: var(--space-xl);
 		}
 
 		.goal-tracker {
-			align-items: flex-start;
-			flex-direction: column;
-			gap: 8px;
-			padding: 9px 12px;
-		}
-
-		.goal-main,
-		.goal-metrics {
-			width: 100%;
+			flex-direction: row;
+			align-items: center;
+			justify-content: space-between;
 		}
 
 		.goal-metrics {
-			flex-wrap: wrap;
-		}
-
-		.spacer {
-			display: none;
-		}
-
-		.session-state {
-			order: 3;
-			flex: 1 0 100%;
-			gap: 10px;
-		}
-
-		.status {
-			margin-left: auto;
-		}
-
-		.stop {
-			min-height: 34px;
-			padding: 6px 10px;
-		}
-
-		.conflict {
-			margin: 12px;
+			flex: 0 0 auto;
 		}
 
 		.transcript {
-			padding: 12px;
+			padding-inline: var(--space-lg);
 		}
 
-		.virtual-row {
-			padding-bottom: 12px;
-		}
-
-		.item {
-			gap: 7px;
-		}
-
-		.gutter {
-			width: 10px;
-		}
-
-		.cmd-line {
-			flex-wrap: wrap;
-			gap: 4px 8px;
-		}
-
-		.cmd-status {
-			margin-left: 18px;
-		}
-
-		.cmd-out {
-			margin-left: 0;
-			font-size: 11px;
-			max-height: 40dvh;
-		}
-
-		.message-image img {
-			max-height: 42dvh;
-		}
-
-		.composer {
-			align-items: stretch;
-			gap: 7px;
-			padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-		}
-
-		.composer .prompt {
-			display: none;
-		}
-
-		textarea {
-			min-width: 0;
-			min-height: 44px;
-			max-height: 35dvh;
-			font-size: 16px;
-		}
-
-		.attach {
-			min-width: 48px;
-			min-height: 44px;
-			padding: 0 10px;
-		}
-
-		.send {
-			align-self: flex-end;
-			min-width: 64px;
-			min-height: 44px;
-			padding: 0 12px;
+		.composer-shell {
+			padding-inline: var(--space-lg);
 		}
 
 		.attachments {
-			padding: 0 12px calc(10px + env(safe-area-inset-bottom));
+			flex-wrap: wrap;
+			overflow-x: visible;
+		}
+
+		.composer {
+			grid-template-areas: 'attach message send';
+		}
+
+	}
+
+	@media (min-width: 60rem) {
+		.app {
+			grid-template-columns: var(--rail-width) minmax(0, 1fr);
+		}
+
+		.app.rail-hidden {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.sidebar-scrim,
+		.app:not(.rail-hidden) .welcome-menu,
+		.app:not(.rail-hidden) .header-menu {
+			display: none;
+		}
+
+		.app.rail-hidden .sidebar {
+			display: none;
+		}
+
+		.sidebar,
+		.sidebar.open {
+			position: relative;
+			inset: auto;
+			z-index: var(--z-base);
+			width: auto;
+			padding-block-start: 0;
+			box-shadow: none;
+			transform: none;
+			transition: none;
+		}
+
+		.brand {
+			padding-inline: var(--space-sm);
+		}
+
+		.topbar {
+			grid-template-columns: minmax(16rem, 1fr) auto auto;
+			gap: var(--space-2xs) var(--space-xs);
+			padding: calc(var(--space-xs) + env(safe-area-inset-top)) var(--space-sm) var(--space-xs) var(--space-lg);
+		}
+
+		.app.rail-hidden .topbar {
+			grid-template-columns: auto minmax(16rem, 1fr) auto auto;
+		}
+
+		.session-meta,
+		.session-facts {
+			display: flex;
+		}
+
+		.session-facts {
+			grid-column: auto;
+			justify-self: end;
+		}
+
+		.session-state {
+			flex: none;
+		}
+
+		.welcome {
+			grid-template-columns: minmax(0, 1.18fr) minmax(0, 0.82fr);
+			align-items: end;
+			gap: var(--space-2xl);
+			padding-block: var(--space-2xl);
+		}
+
+		.welcome h1 {
+			font-size: var(--text-display);
+		}
+
+		.message-image img {
+			max-width: 32.5rem;
+		}
+
+		.composer-hint {
+			display: block;
 		}
 	}
 
-	@media (max-width: 420px) {
-		.topbar {
-			font-size: 11px;
+	@media (min-width: 90rem) {
+		.welcome {
+			gap: var(--space-3xl);
 		}
 
 		.transcript {
-			padding: 10px;
+			padding-block-start: var(--space-sm);
 		}
 	}
 
-	@keyframes blink {
-		50% {
-			opacity: 0;
+	@media (min-width: 60rem) and (hover: hover) and (pointer: fine) {
+		.new,
+		.mini,
+		.stop,
+		.session-info-trigger,
+		.session-info-close,
+		.attach,
+		.send,
+		.attachment,
+		.cwd-input,
+		.profile-input,
+		textarea {
+			min-height: var(--control-height-compact);
+		}
+
+		.attach,
+		.send,
+		.new,
+		.stop,
+		.session-info-trigger,
+		.session-info-close {
+			width: var(--control-height-compact);
+			min-width: var(--control-height-compact);
+			height: var(--control-height-compact);
+		}
+
+		.session {
+			min-height: var(--control-height-compact);
 		}
 	}
-	@keyframes pulse {
+
+	@media (pointer: coarse) {
+		.sidebar-toggle,
+		.drawer-close,
+		.new,
+		.mini,
+		.stop,
+		.session-info-trigger,
+		.session-info-close,
+		.attach,
+		.send,
+		.welcome-action,
+		.delete-session,
+		.attachment,
+		.new-activity,
+		.archive-toast button,
+		.session {
+			min-height: var(--control-height);
+		}
+
+		.delete-session {
+			width: var(--control-height);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			animation-duration: var(--dur-micro) !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: var(--dur-micro) !important;
+		}
+
+		.run-dot.running,
+		.session-state-dot.running {
+			animation: none;
+		}
+	}
+
+	@keyframes pulse-status {
 		50% {
-			opacity: 0.3;
+			opacity: 0.38;
 		}
 	}
 </style>

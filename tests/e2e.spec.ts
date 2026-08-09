@@ -57,16 +57,126 @@ test.afterEach(async ({ request }) => {
 	}
 });
 
-test('loads CLI-style dark UI', async ({ page }) => {
+test('loads warm light editorial UI', async ({ page }) => {
 	await page.goto('/');
 	await expect(page.locator('.brand')).toContainText('yacwu');
-	// Dark background.
+	// The app is light-only and anchored on the warm cream canvas.
 	const bg = await page.evaluate(() =>
 		getComputedStyle(document.body).backgroundColor
 	);
-	expect(bg).toBe('rgb(10, 14, 20)');
+	expect(bg).toBe('oklch(0.98 0.007 88)');
 	// Connection indicator turns on (SSE established).
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+});
+
+test('mobile drawer, compact header, composer growth, and archive undo remain usable', async ({ page }) => {
+	await page.setViewportSize({ width: 375, height: 780 });
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+
+	const welcomeMenu = page.locator('.welcome-menu');
+	await expect(welcomeMenu).toBeVisible();
+	await expect(page.locator('#session-sidebar')).toHaveAttribute('inert', '');
+	await welcomeMenu.click();
+	await expect(page.locator('#session-sidebar')).not.toHaveAttribute('inert', '');
+	await expect(page.locator('.drawer-close')).toBeFocused();
+	await page.keyboard.press('Escape');
+	await expect(welcomeMenu).toBeFocused();
+
+	await welcomeMenu.click();
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
+	await expect(page.locator('.composer')).toBeVisible();
+	for (const width of [320, 375, 414, 768]) {
+		await page.setViewportSize({ width, height: 780 });
+		const responsiveBounds = await page.evaluate(() => ({
+			clientWidth: document.documentElement.clientWidth,
+			scrollWidth: document.documentElement.scrollWidth,
+			headerHeight: document.querySelector('.topbar')!.getBoundingClientRect().height,
+			composerRight: document.querySelector('.composer')!.getBoundingClientRect().right
+		}));
+		expect(responsiveBounds.scrollWidth).toBe(responsiveBounds.clientWidth);
+		expect(responsiveBounds.headerHeight).toBeLessThanOrEqual(60);
+		expect(responsiveBounds.composerRight).toBeLessThanOrEqual(responsiveBounds.clientWidth);
+	}
+	await page.setViewportSize({ width: 375, height: 780 });
+
+	const dimensions = await page.locator('.topbar').evaluate((element) => ({
+		height: element.getBoundingClientRect().height,
+		right: element.getBoundingClientRect().right,
+		viewport: document.documentElement.clientWidth,
+		overflow: document.documentElement.scrollWidth
+	}));
+	expect(dimensions.height).toBeLessThanOrEqual(60);
+	expect(dimensions.right).toBeLessThanOrEqual(dimensions.viewport);
+	expect(dimensions.overflow).toBe(dimensions.viewport);
+	await expect(page.locator('.topbar .session-heading h1')).toHaveCSS('font-family', /Inter Variable/);
+
+	const info = page.locator('.session-info-trigger');
+	await expect(info).toHaveAttribute('aria-label', /idle/);
+	await info.click();
+	await expect(page.locator('.session-info-dialog')).toBeVisible();
+	await expect(page.locator('.session-info-dialog')).toContainText('Session details');
+	await page.locator('.session-info-close').click();
+
+	const textarea = page.locator('.composer textarea');
+	const before = await textarea.evaluate((element) => element.getBoundingClientRect().height);
+	await textarea.fill('one\ntwo\nthree\nfour');
+	const after = await textarea.evaluate((element) => element.getBoundingClientRect().height);
+	expect(after).toBeGreaterThan(before);
+	await textarea.press('End');
+	await textarea.press('Enter');
+	await expect(textarea).toHaveValue('one\ntwo\nthree\nfour\n');
+	const composerGeometry = await page.locator('.composer').evaluate((element) => {
+		const textarea = element.querySelector('textarea')!;
+		const attach = element.querySelector('.attach')!;
+		const send = element.querySelector('.send')!;
+		return {
+			width: element.getBoundingClientRect().width,
+			textareaWidth: textarea.getBoundingClientRect().width,
+			attachHeight: attach.getBoundingClientRect().height,
+			sendHeight: send.getBoundingClientRect().height
+		};
+	});
+	expect(composerGeometry.width).toBeGreaterThanOrEqual(350);
+	expect(composerGeometry.textareaWidth).toBeGreaterThanOrEqual(190);
+	expect(composerGeometry.attachHeight).toBeGreaterThanOrEqual(44);
+	expect(composerGeometry.sendHeight).toBeGreaterThanOrEqual(44);
+	await expect(page.locator('.composer-hint')).toBeHidden();
+	await textarea.fill('Reply with exactly: OK');
+	await page.locator('.send').click();
+	await expect(page.locator('.item.agent .body').last()).toContainText('OK', { timeout: 90_000 });
+
+	await page.locator('.header-menu').click();
+	await expect(page.locator('.drawer-close')).toBeFocused();
+	const active = page.locator('.session.active');
+	const activeId = await active.getAttribute('data-id');
+	if (!activeId) throw new Error('new session did not expose its id');
+	const activeRow = page.locator('.session-row', { has: active });
+	await activeRow.hover();
+	await activeRow.locator('.delete-session').click();
+	await expect(page.locator('.archive-toast')).toContainText('Archived');
+	await page.locator('.archive-toast button', { hasText: 'Undo' }).click();
+	await expect(page.locator(`.session[data-id="${activeId}"]`)).toBeAttached();
+
+	await page.setViewportSize({ width: 1280, height: 800 });
+	await page.goto(`/s/${activeId}`);
+	await expect(page.locator('.composer-hint')).toBeVisible();
+	await expect(page.locator('.drawer-close')).toBeVisible();
+	await expect(page.locator('#session-sidebar')).not.toHaveAttribute('inert', '');
+	await page.locator('.drawer-close').click();
+	await expect(page.locator('.app')).toHaveClass(/rail-hidden/);
+	await expect(page.locator('#session-sidebar')).toBeHidden();
+	await expect(page.locator('.header-menu')).toBeVisible();
+	await expect(page.locator('.header-menu')).toBeFocused();
+	const composerCenter = await page.locator('.composer').evaluate((element) => {
+		const rect = element.getBoundingClientRect();
+		return { actual: rect.left + rect.width / 2, expected: document.documentElement.clientWidth / 2 };
+	});
+	expect(Math.abs(composerCenter.actual - composerCenter.expected)).toBeLessThanOrEqual(1);
+	await page.locator('.header-menu').click();
+	await expect(page.locator('#session-sidebar')).toBeVisible();
+	await expect(page.locator('.drawer-close')).toBeFocused();
 });
 
 test('multi-session: create two, stream a reply, switch between them', async ({ page }) => {
@@ -83,7 +193,7 @@ test('multi-session: create two, stream a reply, switch between them', async ({ 
 
 	// Session A (default working directory via the picker).
 	await page.locator('button.new').click();
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.composer')).toBeVisible();
 	await expect(page.locator('.session')).toHaveCount(sessionsBefore + 1);
 
@@ -97,7 +207,7 @@ test('multi-session: create two, stream a reply, switch between them', async ({ 
 	await expect(page.locator('.item.agent .body').last()).toContainText('PONG', {
 		timeout: 90_000
 	});
-	await expect(page.locator('.topbar .status')).toContainText('idle', {
+	await expect(page.locator('.topbar .session-info-trigger')).toHaveAttribute('aria-label', /idle/, {
 		timeout: 90_000
 	});
 
@@ -106,7 +216,7 @@ test('multi-session: create two, stream a reply, switch between them', async ({ 
 
 	// Session B — independent, should start empty.
 	await page.locator('button.new').click();
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.session')).toHaveCount(sessionsBefore + 2);
 	await expect(page.locator('.item.agent')).toHaveCount(0);
 
@@ -127,7 +237,7 @@ test('new session can target a specific working directory', async ({ page }) => 
 	await page.locator('button.new').click();
 	await expect(page.locator('.cwd-input')).toBeVisible();
 	await page.locator('.cwd-input').fill('/tmp');
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 
 	// Composer opens and the topbar reflects the chosen cwd.
 	await expect(page.locator('.composer')).toBeVisible();
@@ -138,7 +248,7 @@ test('new session can target a specific working directory', async ({ page }) => 
 	// A bad directory surfaces an error instead of creating a session.
 	await page.locator('button.new').click();
 	await page.locator('.cwd-input').fill('/no/such/dir/xyz');
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.create-err')).toContainText('does not exist', {
 		timeout: 15_000
 	});
@@ -149,7 +259,7 @@ test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) 
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
 
 	await page.locator('button.new').click();
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.composer')).toBeVisible();
 
 	const ta = page.locator('.composer textarea');
@@ -162,9 +272,6 @@ test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) 
 	// /goal sets a goal -> header shows it, a note confirms.
 	await ta.fill('/goal Placeholder e2e goal (not an instruction)');
 	await page.locator('button.send').click();
-	await expect(page.locator('.topbar .goal')).toContainText('Placeholder e2e goal (not an instruction)', {
-		timeout: 15_000
-	});
 	await expect(page.locator('.goal-tracker')).toContainText('Placeholder e2e goal (not an instruction)');
 	await expect(page.locator('.goal-tracker')).toContainText('active');
 	await expect(page.locator('.item.note').last()).toContainText('goal set');
@@ -180,7 +287,6 @@ test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) 
 	// /goal clear removes it.
 	await ta.fill('/goal clear');
 	await page.locator('button.send').click();
-	await expect(page.locator('.topbar .goal')).toHaveCount(0, { timeout: 15_000 });
 	await expect(page.locator('.goal-tracker')).toHaveCount(0);
 	await expect(page.locator('.item.note').last()).toContainText('goal cleared');
 
@@ -200,7 +306,7 @@ test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) 
 	await ta.fill('/compact');
 	await page.locator('button.send').click();
 	await expect(page.locator('.item.note').last()).toContainText('compacting history');
-	await expect(page.locator('.topbar .status')).toContainText('running');
+	await expect(page.locator('.topbar .session-info-trigger')).toHaveAttribute('aria-label', /running/);
 	expect(compactCalls).toBe(1);
 
 	// /review forwards optional instructions to the review route.
@@ -311,7 +417,7 @@ test('slash command: /status reports account, limits & session info', async ({ p
 	await page.goto('/');
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
 	await page.locator('button.new').click();
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.composer')).toBeVisible();
 
 	await page.locator('.composer textarea').fill('/status');
@@ -320,6 +426,7 @@ test('slash command: /status reports account, limits & session info', async ({ p
 	const note = page.locator('.item.note .body').last();
 	await expect(note).toContainText('model     gpt-5.4', { timeout: 15_000 });
 	await expect(note).toContainText('effort    high');
+	await expect(note).toContainText('context   unavailable');
 	await expect(note).toContainText('account   dev@example.com · pro', { timeout: 15_000 });
 	await expect(note).toContainText('5h limit  42% used');
 	await expect(note).toContainText('7d limit  7% used');
@@ -353,7 +460,7 @@ test('slash command: /model lists and changes model settings', async ({ page }) 
 	await page.goto('/');
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
 	await page.locator('button.new').click();
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.composer')).toBeVisible();
 
 	const textarea = page.locator('.composer textarea');
@@ -374,7 +481,7 @@ test('new transcript output preserves scroll when not at the bottom', async ({ p
 	await page.goto('/');
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
 	await page.locator('button.new').click();
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.composer')).toBeVisible();
 
 	const ta = page.locator('.composer textarea');
@@ -415,7 +522,7 @@ test('warns when a session is in use by another codex instance', async ({ page, 
 		// Opening it is blocked with the conflict banner naming the holding process.
 		await session.click();
 		await expect(page.locator('.conflict')).toBeVisible({ timeout: 15_000 });
-		await expect(page.locator('.conflict')).toContainText('another codex instance');
+		await expect(page.locator('.conflict')).toContainText('Session already open elsewhere');
 		await expect(page.locator('.composer')).toHaveCount(0);
 
 		// "open anyway" overrides and loads the session.
@@ -434,7 +541,7 @@ test('session id is reflected in the URL and the sidebar uses links', async ({ p
 
 	// Creating a session navigates to /s/<id>.
 	await page.locator('button.new').click();
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.composer')).toBeVisible();
 	await expect(page).toHaveURL(/\/s\/[0-9a-f-]{36}$/);
 	const id = page.url().split('/s/')[1];
@@ -480,7 +587,7 @@ test('slash command & picker: /profile selects codex profiles', async ({ page })
 	await page.locator('button.new').click();
 	await expect(page.locator('.profile-input')).toBeVisible();
 	await expect(page.locator('.profile-input option')).toHaveCount(3);
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.composer')).toBeVisible();
 	expect(createBody).toEqual({});
 
@@ -508,7 +615,7 @@ test('slash command & picker: /profile selects codex profiles', async ({ page })
 	// stub-only name, proving validation runs against the profiles on disk.
 	await page.locator('button.new').click();
 	await page.locator('.profile-input').selectOption('fast');
-	await page.locator('.create button.mini', { hasText: 'start' }).click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
 	await expect(page.locator('.create-err')).toContainText('unknown profile: fast', {
 		timeout: 15_000
 	});

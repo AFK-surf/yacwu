@@ -1,6 +1,6 @@
 # yacwu
 
-**Yet Another Codex Web UI** — a minimalist, CLI-style web front-end for
+**Yet Another Codex Web UI** — a focused, editorial web front-end for
 [Codex](https://developers.openai.com/codex), with a **Gleam (BEAM/OTP)**
 backend and a **Svelte** SPA front-end.
 
@@ -11,7 +11,7 @@ state lives entirely in Codex's own persistent sessions, read back via
 
 ## Features
 
-- 🖥️ Minimalist CLI/terminal aesthetic, dark background
+- 🖥️ Warm, light-only workspace with readable conversation and tool-output surfaces
 - 🧵 Multi-session: list, create (in a chosen working directory), switch, and resume Codex threads
 - 🔒 In-use detection: warns before opening a session another codex instance
   already has loaded (so two processes don't corrupt one conversation)

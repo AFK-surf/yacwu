@@ -143,6 +143,8 @@ fn dispatch(
     ["api", "threads", id, "fork"], Post -> fork(ctx, req, id)
     ["api", "threads", id, "archive"], Post ->
       simple_rpc(ctx, "thread/archive", id)
+    ["api", "threads", id, "unarchive"], Post ->
+      simple_rpc(ctx, "thread/unarchive", id)
     ["api", ..], _ -> json_response(404, error_body("not found"))
     _, Get -> static_files.serve(ctx.static_dir, req.path, include_body)
     _, _ -> text_response(404, "not found")
