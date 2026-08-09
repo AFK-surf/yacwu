@@ -79,6 +79,31 @@ export interface SubAgentActivityItem {
 	agentPath: string;
 }
 
+export interface CollabAgentState {
+	status:
+		| 'pendingInit'
+		| 'running'
+		| 'interrupted'
+		| 'completed'
+		| 'errored'
+		| 'shutdown'
+		| 'notFound';
+	message?: string | null;
+}
+
+export interface CollabAgentToolCallItem {
+	type: 'collabAgentToolCall';
+	id: string;
+	tool: 'spawnAgent' | 'sendInput' | 'resumeAgent' | 'wait' | 'closeAgent';
+	status: 'inProgress' | 'completed' | 'failed';
+	senderThreadId: string;
+	receiverThreadIds: string[];
+	prompt?: string | null;
+	model?: string | null;
+	reasoningEffort?: string | null;
+	agentsStates?: Record<string, CollabAgentState>;
+}
+
 export interface GenericItem {
 	type: string;
 	id: string;
@@ -93,6 +118,7 @@ export type ThreadItem =
 	| FileChangeItem
 	| PlanItem
 	| SubAgentActivityItem
+	| CollabAgentToolCallItem
 	| GenericItem;
 
 export interface Turn {

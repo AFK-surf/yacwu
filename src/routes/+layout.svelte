@@ -1114,6 +1114,46 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		}
 	}
 
+	function truncateText(text: string, max: number): string {
+		return text.length > max ? text.slice(0, max).trimEnd() + '…' : text;
+	}
+
+	// Summaries mirror the Codex TUI's collab tool-call rows.
+	function collabSummary(item: any): string {
+		const receivers: string[] = item.receiverThreadIds ?? [];
+		const target = receivers[0] ? receivers[0].slice(0, 8) : null;
+		const inProgress = item.status === 'inProgress';
+		switch (item.tool) {
+			case 'spawnAgent':
+				if (inProgress) return 'Spawning agent…';
+				return target ? `Spawned agent ${target}` : 'Agent spawn failed';
+			case 'sendInput':
+				return `${inProgress ? 'Sending input to' : 'Sent input to'} ${target ?? 'agent'}`;
+			case 'resumeAgent':
+				return `${inProgress ? 'Resuming' : 'Resumed'} ${target ?? 'agent'}`;
+			case 'wait':
+				if (inProgress) {
+					return receivers.length > 1
+						? `Waiting for ${receivers.length} agents…`
+						: `Waiting for ${target ?? 'agents'}…`;
+				}
+				return 'Finished waiting';
+			case 'closeAgent':
+				return `${inProgress ? 'Closing' : 'Closed'} ${target ?? 'agent'}`;
+			default:
+				return `agent tool: ${item.tool ?? 'unknown'}`;
+		}
+	}
+
+	function collabAgentStates(item: any): Array<{ id: string; status: string; message: string | null }> {
+		const states = item.agentsStates ?? {};
+		return Object.entries(states).map(([id, state]: [string, any]) => ({
+			id: id.slice(0, 8),
+			status: state?.status ?? 'unknown',
+			message: state?.message ?? null
+		}));
+	}
+
 	onMount(() => {
 		const mobileQuery = window.matchMedia('(max-width: 760px)');
 		const updateMobileViewport = () => (mobileViewport = mobileQuery.matches);
@@ -1453,6 +1493,29 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								<div class="item subagent" title={`agent thread ${(item as any).agentThreadId ?? ''}`}>
 									<span class="gutter">⎇</span>
 									<div class="body">{activity.prefix} <span class="agent-path">{activity.path}</span></div>
+								</div>
+							{:else if item.type === 'collabAgentToolCall'}
+								<div class="item collab">
+									<div class="collab-line">
+										<span class="gutter">⇄</span>
+										<span class="collab-text">{collabSummary(item)}</span>
+										<span class="cmd-status {(item as any).status}">{(item as any).status}</span>
+									</div>
+									{#if (item as any).prompt}
+										<div class="collab-detail">{truncateText((item as any).prompt, 160)}</div>
+									{/if}
+									{#if (item as any).tool === 'spawnAgent' && ((item as any).model || (item as any).reasoningEffort)}
+										<div class="collab-detail">
+											{(item as any).model ?? ''}{#if (item as any).reasoningEffort} · {(item as any).reasoningEffort}{/if}
+										</div>
+									{/if}
+									{#if (item as any).tool === 'wait' && (item as any).status !== 'inProgress'}
+										{#each collabAgentStates(item) as agent}
+											<div class="collab-detail">
+												{agent.id}: {agent.status}{#if agent.message} — {truncateText(agent.message, 160)}{/if}
+											</div>
+										{/each}
+									{/if}
 								</div>
 							{:else}
 								<div class="item generic">
@@ -2162,6 +2225,32 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 	.item.subagent .agent-path {
 		color: var(--accent);
+	}
+	.item.collab {
+		flex-direction: column;
+		gap: 2px;
+		align-items: stretch;
+	}
+	.item.collab .gutter {
+		color: var(--accent);
+	}
+	.collab-line {
+		display: flex;
+		gap: 8px;
+		align-items: baseline;
+	}
+	.collab-text {
+		flex: 1;
+		color: var(--fg);
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
+	.collab-detail {
+		margin-left: 20px;
+		color: var(--fg-dim);
+		font-size: 12px;
+		white-space: pre-wrap;
+		word-break: break-word;
 	}
 	.blink {
 		animation: blink 1s step-start infinite;

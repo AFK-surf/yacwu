@@ -1084,7 +1084,7 @@ The fuzzy file search session API emits per-query notifications:
 - `fileChange` - `{id, changes, status}` describing proposed edits; `changes` list `{path, kind, diff}`.
 - `mcpToolCall` - `{id, server, tool, status, arguments, result?, error?}`.
 - `dynamicToolCall` - `{id, tool, arguments, status, contentItems?, success?, durationMs?}` for client-executed dynamic tool invocations.
-- `collabToolCall` - `{id, tool, status, senderThreadId, receiverThreadId?, newThreadId?, prompt?, agentStatus?}`.
+- `collabAgentToolCall` - `{id, tool, status, senderThreadId, receiverThreadIds, prompt?, model?, reasoningEffort?, agentsStates?}` for multi-agent collaboration calls; `tool` is `spawnAgent`, `sendInput`, `resumeAgent`, `wait`, or `closeAgent`, `status` is `inProgress`, `completed`, or `failed`, and `agentsStates` maps agent thread ids to `{status, message?}`.
 - `webSearch` - `{id, query, action?}` for web search requests issued by the agent.
 - `imageView` - `{id, path}` emitted when the agent invokes the image viewer tool.
 - `enteredReviewMode` - `{id, review}` sent when the reviewer starts.
