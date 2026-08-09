@@ -66,6 +66,13 @@ A four-point named scale lives in `tokens.css`. Components use named tokens; raw
 - Conversation state is icon-only: a quiet dot for idle and a pulsing activity glyph for running, always paired with an accessible name and tooltip.
 - Operational transcript events are flat activity-log rows separated by hairlines. Commands, file changes, plans, reasoning, reviews, and collaboration events never receive rounded card shells or tinted fills; dark surfaces are reserved for authored fenced code.
 
+## File browser
+
+- The file browser is a right-docked inspector drawer on the paper surface; it overlays the transcript and never reflows it. Narrow viewports switch between tree and viewer, file-manager style.
+- The directory tree uses the mono technical register at 13–14 px, directories first, dotfiles in the muted ink. Selection is a paper-3 fill, consistent with the session rail.
+- File contents render in a read-only Monaco viewer themed to the paper palette (`yacwu-paper`): cream background, warm ink, syntax colors held to the muted end of the coral/olive/plum range. The viewer is a bounded technical surface and stays light; charcoal remains reserved for authored fenced code.
+- Transcript file-change paths inside the session working directory are quiet links: ink at rest, coral underline on hover/focus, opening the browser at that file.
+
 ## Motion
 
 - Easings: `--ease-out`, `--ease-in`, and `--ease-in-out` from `tokens.css`.

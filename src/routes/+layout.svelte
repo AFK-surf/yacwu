@@ -15,6 +15,7 @@
 	} from '$lib/protocol';
 	import { parseSlash, SLASH_HELP, filterSlashCommands, type SlashCommandInfo } from '$lib/slash';
 	import { ComposerHistory } from '$lib/history';
+	import FileBrowser from '$lib/FileBrowser.svelte';
 	import { parseCodexMarkdown, type MarkdownBlock, type MarkdownInline } from '$lib/markdown';
 
 	let { children } = $props();
@@ -102,6 +103,11 @@
 	let unseenActivity = $state(false);
 	let archiveNotice = $state<ArchiveNotice | null>(null);
 	let sessionInfoDialog = $state<HTMLDialogElement | null>(null);
+	// Read-only file browser (FileBrowser.svelte), rooted at the session cwd.
+	let filesOpen = $state(false);
+	let filesReveal = $state<{ path: string; nonce: number } | null>(null);
+	let filesRefresh = $state(0);
+	let filesToggleEl = $state<HTMLButtonElement | null>(null);
 	let sidebarEl = $state<HTMLElement | null>(null);
 	let sidebarToggleEl = $state<HTMLButtonElement | null>(null);
 	let imageInputEl = $state<HTMLInputElement | null>(null);
@@ -340,6 +346,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			case 'item/started':
 			case 'item/completed': {
 				if (tid && p.item?.id) upsertItem(tid, p.item);
+				// The file browser refreshes what it is showing when the agent
+				// touches files in the viewed session.
+				if (tid === activeId && p.item?.type === 'fileChange') filesRefresh += 1;
 				break;
 			}
 			case 'item/agentMessage/delta': {
@@ -1600,6 +1609,22 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		return '~';
 	}
 
+	function toggleFilesPanel() {
+		filesOpen = !filesOpen;
+		if (!filesOpen) filesToggleEl?.focus();
+	}
+
+	function closeFilesPanel() {
+		filesOpen = false;
+		filesToggleEl?.focus();
+	}
+
+	/** Open the file browser at a transcript file-change path (session-relative). */
+	function openFileInBrowser(rel: string) {
+		filesOpen = true;
+		filesReveal = { path: rel, nonce: ++localCounter };
+	}
+
 	function displayFileChangePath(ch: any): string {
 		const path = fileChangePath(ch);
 		const cwd = activeId ? (cwds[activeId] ?? activeSummary?.cwd) : null;
@@ -2217,6 +2242,19 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				</div>
 				<div class="session-state">
 					<button
+						class="files-trigger"
+						type="button"
+						bind:this={filesToggleEl}
+						onclick={toggleFilesPanel}
+						aria-pressed={filesOpen}
+						aria-label={filesOpen ? 'Close file browser' : 'Browse session files'}
+						title={filesOpen ? 'Close file browser' : 'Browse session files'}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+							<path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z" />
+						</svg>
+					</button>
+					<button
 						class="session-info-trigger"
 						type="button"
 						onclick={openSessionInfo}
@@ -2244,6 +2282,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					{/if}
 				</div>
 			</header>
+
+			{#if filesOpen}
+				{#key activeId}
+					<FileBrowser
+						threadId={activeId}
+						cwd={cwds[activeId] ?? activeSummary?.cwd ?? ''}
+						reveal={filesReveal}
+						refreshNonce={filesRefresh}
+						onclose={closeFilesPanel}
+					/>
+				{/key}
+			{/if}
 
 			<dialog
 				class="session-info-dialog"
@@ -2447,9 +2497,19 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								<div class="item file">
 									<div class="body">
 										{#each (item as any).changes ?? [] as ch}
+											{@const rel = displayFileChangePath(ch)}
 											<div class="fc">
 												<span class="kind {fileChangeClass(ch)}" aria-label={fileChangeKind(ch)} title={fileChangeKind(ch)}>{fileChangeSymbol(ch)}</span>
-												<span class="path">{displayFileChangePath(ch)}</span>
+												{#if !rel.startsWith('/') && !fileChangeKind(ch).toLowerCase().includes('delete')}
+													<button
+														type="button"
+														class="path path-link"
+														title="Open in file browser"
+														onclick={() => openFileInBrowser(rel)}
+													>{rel}</button>
+												{:else}
+													<span class="path">{rel}</span>
+												{/if}
 											</div>
 										{/each}
 									</div>
@@ -3408,6 +3468,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		justify-self: end;
 	}
 
+	.files-trigger,
 	.session-info-trigger,
 	.session-info-close {
 		display: grid;
@@ -3426,10 +3487,17 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			transform var(--dur-micro) var(--ease-out);
 	}
 
+	.files-trigger[aria-pressed='true'] {
+		border-color: var(--color-rule);
+		background: var(--color-paper-3);
+		color: var(--color-ink);
+	}
+
 	.session-info-trigger {
 		position: relative;
 	}
 
+	.files-trigger svg,
 	.session-info-trigger svg,
 	.session-info-close svg {
 		display: block;
@@ -4326,6 +4394,28 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		min-width: 0;
 	}
 
+	.fc .path-link {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+		font: inherit;
+		text-align: start;
+		text-decoration: underline;
+		text-decoration-color: transparent;
+		text-decoration-thickness: var(--rule-hair);
+		text-underline-offset: var(--space-3xs);
+		overflow-wrap: anywhere;
+		transition: color var(--dur-micro) var(--ease-out);
+	}
+
+	.fc .path-link:hover,
+	.fc .path-link:focus-visible {
+		color: var(--color-accent-active);
+		text-decoration-color: currentColor;
+	}
+
 	.step {
 		color: var(--color-muted);
 		font-family: var(--font-outlier);
@@ -4716,6 +4806,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.mini.ghost:hover,
 		.attach:hover,
 		.stop:hover,
+		.files-trigger:hover,
 		.session-info-trigger:hover,
 		.session-info-close:hover,
 		.delete-session:hover,
@@ -4752,6 +4843,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.new:active,
 	.mini:active,
 	.stop:active,
+	.files-trigger:active,
 	.session-info-trigger:active,
 	.session-info-close:active,
 	.attach:active,
@@ -4905,6 +4997,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.new,
 		.mini,
 		.stop,
+		.files-trigger,
 		.session-info-trigger,
 		.session-info-close,
 		.attach,
@@ -4920,6 +5013,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.send,
 		.new,
 		.stop,
+		.files-trigger,
 		.session-info-trigger,
 		.session-info-close {
 			width: var(--control-height-compact);
@@ -4946,6 +5040,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.new,
 		.mini,
 		.stop,
+		.files-trigger,
 		.session-info-trigger,
 		.session-info-close,
 		.attach,

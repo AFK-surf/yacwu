@@ -19,6 +19,9 @@ state lives entirely in Codex's own persistent sessions, read back via
 - ⌨️ Slash commands mirroring the Codex TUI (see below)
 - ⌨️ Up/Down message history in the composer, with the Codex TUI's shell-style
   recall semantics (a resumed thread seeds history from its prior prompts)
+- 📁 Read-only file browser rooted at the session's working directory, with a
+  Monaco viewer (lazy-loaded from jsDelivr, never vendored) and clickable
+  file-change paths in the transcript
 - 🎛️ Per-session codex profiles: pick a `$CODEX_HOME/<name>.config.toml` when
   creating a session (or with `/profile`)
 - 🔌 Single `codex app-server` process multiplexed over one connection; events
