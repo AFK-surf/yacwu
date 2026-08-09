@@ -11,13 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl1.1 libncurses6 zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
-# Prebuilt Erlang/OTP for this exact distro from hex.pm's build service (the
-# same builds erlef/setup-beam uses), so nothing is compiled here. Its crypto
-# NIF links the distro's libssl 1.1 dynamically; the AppImage bundles that
-# library alongside the runtime.
+# Prebuilt Erlang/OTP for this exact distro and CPU architecture from hex.pm's
+# build service (the same builds erlef/setup-beam uses), so nothing is compiled
+# here. Its crypto NIF links the distro's libssl 1.1 dynamically; the AppImage
+# bundles that library alongside the runtime.
 ARG OTP_VERSION=27.3
-ARG OTP_BUILD=amd64/ubuntu-20.04
-RUN curl -fsSL "https://builds.hex.pm/builds/otp/${OTP_BUILD}/OTP-${OTP_VERSION}.tar.gz" \
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in amd64|arm64) ;; *) echo "Unsupported architecture: $arch" >&2; exit 1;; esac \
+    && curl -fsSL "https://builds.hex.pm/builds/otp/${arch}/ubuntu-20.04/OTP-${OTP_VERSION}.tar.gz" \
       -o /tmp/otp.tar.gz \
     && mkdir /opt/erlang \
     && tar -xzf /tmp/otp.tar.gz -C /opt/erlang --strip-components=1 \
@@ -27,7 +28,9 @@ ENV PATH="/opt/erlang/bin:${PATH}"
 
 # Gleam (statically linked musl build, runs anywhere) + rebar3 (escript).
 ARG GLEAM_VERSION=1.18.1
-RUN curl -fsSL "https://github.com/gleam-lang/gleam/releases/download/v${GLEAM_VERSION}/gleam-v${GLEAM_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in amd64) gleam_arch=x86_64;; arm64) gleam_arch=aarch64;; *) echo "Unsupported architecture: $arch" >&2; exit 1;; esac \
+    && curl -fsSL "https://github.com/gleam-lang/gleam/releases/download/v${GLEAM_VERSION}/gleam-v${GLEAM_VERSION}-${gleam_arch}-unknown-linux-musl.tar.gz" \
       | tar -xz -C /usr/local/bin gleam \
     && curl -fsSL https://s3.amazonaws.com/rebar3/rebar3 -o /usr/local/bin/rebar3 \
     && chmod +x /usr/local/bin/rebar3
@@ -37,7 +40,9 @@ RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
 # appimagetool; APPIMAGE_EXTRACT_AND_RUN lets it run without FUSE in Docker.
-RUN curl -fsSL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in amd64) appimage_arch=x86_64;; arm64) appimage_arch=aarch64;; *) echo "Unsupported architecture: $arch" >&2; exit 1;; esac \
+    && curl -fsSL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${appimage_arch}.AppImage" \
       -o /usr/local/bin/appimagetool \
     && chmod +x /usr/local/bin/appimagetool
 ENV APPIMAGE_EXTRACT_AND_RUN=1

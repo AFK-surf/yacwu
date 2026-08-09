@@ -110,7 +110,7 @@ tar -xzf yacwu-1.0.0.tar.gz
 ## AppImage
 
 ```bash
-./scripts/build-appimage.sh   # produces dist/yacwu-x86_64.AppImage
+./scripts/build-appimage.sh   # produces dist/yacwu-<architecture>.AppImage
 ```
 
 Requires Docker (or podman with the docker CLI shim). The whole build runs in
@@ -119,11 +119,12 @@ distros at least that old: it pulls the prebuilt Erlang/OTP for that distro
 from hex.pm's build service (the same builds `erlef/setup-beam` uses), exports
 the backend with `gleam export erlang-shipment`, and bundles the pruned Erlang
 runtime, the web UI build, and the non-glibc shared libraries the runtime
-needs (libssl, libtinfo, …).
+needs (libssl, libtinfo, …). Both x86_64 and aarch64 Docker hosts are
+supported; the output uses the corresponding architecture in its filename.
 
 ```bash
-./dist/yacwu-x86_64.AppImage --help
-./dist/yacwu-x86_64.AppImage 0.0.0.0:8080
+./dist/yacwu-$(uname -m).AppImage --help
+./dist/yacwu-$(uname -m).AppImage 0.0.0.0:8080
 ```
 
 The AppImage accepts the same flags/env as the server. It still needs the

@@ -3,7 +3,14 @@
 # mounted read-only at /src and writes the finished AppImage to /out.
 set -eu
 
-ARCH=x86_64
+case "$(uname -m)" in
+  x86_64 | amd64) ARCH=x86_64 ;;
+  aarch64 | arm64) ARCH=aarch64 ;;
+  *)
+    echo "Unsupported architecture: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
 SRC=/src
 OUT=/out
 WORK=/work

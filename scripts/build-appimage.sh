@@ -1,7 +1,7 @@
 #!/bin/sh
-# Builds dist/yacwu-x86_64.AppImage.
+# Builds dist/yacwu-<architecture>.AppImage for the Docker host architecture.
 #
-# Everything runs in a Debian bullseye (glibc 2.31) container — see
+# Everything runs in an Ubuntu 20.04 (glibc 2.31) container — see
 # scripts/appimage/ — so the resulting AppImage runs on distros at least that
 # old. Requires Docker (or podman with the docker CLI shim).
 #
@@ -21,4 +21,4 @@ docker run --rm \
   -e HOST_GID="$(id -g)" \
   yacwu-appimage-builder
 
-echo "Built dist/yacwu-x86_64.AppImage"
+echo "Built AppImage in dist/"
