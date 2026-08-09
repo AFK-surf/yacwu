@@ -101,9 +101,12 @@
 	let transcriptScrollTop = $state(0);
 	let transcriptViewportHeight = $state(0);
 	let transcriptHeightVersion = $state(0);
+	let commandOutputExpanded = $state<Record<string, boolean>>({});
 	const rowHeights = new Map<string, number>();
 	const ESTIMATED_ROW_HEIGHT = 72;
 	const VIRTUAL_OVERSCAN_PX = 700;
+	const COMMAND_OUTPUT_COLLAPSE_LINES = 10;
+	const COMMAND_OUTPUT_COLLAPSE_CHARS = 1200;
 	let archiveNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// The active session is whatever is in the URL (/s/<id>); / shows the welcome.
@@ -232,6 +235,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		delete threads[id];
 		delete sessionConfigs[id];
 		delete cwds[id];
+		for (const key of Object.keys(commandOutputExpanded)) {
+			if (key.startsWith(`${id}:`)) delete commandOutputExpanded[key];
+		}
 		sessionStorage.removeItem(sideParentKey(id));
 	}
 
@@ -1380,6 +1386,44 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		return 'In progress';
 	}
 
+	function commandOutput(item: any): string {
+		return String(item._out || item.aggregatedOutput || '');
+	}
+
+	function commandOutputLineCount(output: string): number {
+		if (!output) return 0;
+		return output.endsWith('\n') ? output.slice(0, -1).split('\n').length : output.split('\n').length;
+	}
+
+	function commandOutputIsLong(output: string): boolean {
+		return commandOutputLineCount(output) > COMMAND_OUTPUT_COLLAPSE_LINES || output.length > COMMAND_OUTPUT_COLLAPSE_CHARS;
+	}
+
+	function commandOutputStateKey(item: any): string {
+		return `${activeId ?? 'none'}:${String(item.id ?? '')}`;
+	}
+
+	function commandOutputIsExpanded(item: any, output: string): boolean {
+		const saved = commandOutputExpanded[commandOutputStateKey(item)];
+		if (saved !== undefined) return saved;
+		return item.status === 'inProgress' || !commandOutputIsLong(output);
+	}
+
+	function toggleCommandOutput(item: any, output: string) {
+		const key = commandOutputStateKey(item);
+		commandOutputExpanded[key] = !commandOutputIsExpanded(item, output);
+	}
+
+	function commandOutputId(item: any): string {
+		return `command-output-${commandOutputStateKey(item).replace(/[^a-zA-Z0-9_-]+/g, '-')}`;
+	}
+
+	function commandOutputCountLabel(output: string): string {
+		const lines = commandOutputLineCount(output);
+		if (lines === 1 && output.length > COMMAND_OUTPUT_COLLAPSE_CHARS) return `${output.length} chars`;
+		return `${lines} ${lines === 1 ? 'line' : 'lines'}`;
+	}
+
 	function subAgentActivityParts(item: any): { prefix: string; path: string } {
 		const path = item.agentPath ?? item.agentThreadId ?? 'agent';
 		switch (item.kind) {
@@ -1477,6 +1521,23 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		alt="Codex"
 		title="Codex"
 	/>
+{/snippet}
+
+{#snippet commandResult(item: any)}
+	<span
+		class="cmd-result {item.status}"
+		role="img"
+		aria-label={commandStatusLabel(item)}
+		title={commandStatusLabel(item)}
+	>
+		{#if item.status === 'completed'}
+			<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>
+		{:else if item.status === 'failed'}
+			<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
+		{:else}
+			<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8h3l2-4 3 8 2-4h2" /></svg>
+		{/if}
+	</span>
 {/snippet}
 
 {#snippet markdownInlines(tokens: MarkdownInline[])}
@@ -2030,27 +2091,37 @@ Do not modify files, source, git state, permissions, configuration, or any other
 									</div>
 								{/if}
 							{:else if item.type === 'commandExecution'}
+								{@const output = commandOutput(item)}
+								{@const outputExpanded = commandOutputIsExpanded(item, output)}
 								<div class="item cmd">
-									<div class="cmd-line">
-										<span class="gutter">$</span>
-										<span class="cmd-text">{displayCommand((item as any).command)}</span>
-										<span
-											class="cmd-result {(item as any).status}"
-											role="img"
-											aria-label={commandStatusLabel(item)}
-											title={commandStatusLabel(item)}
+									{#if output}
+										<button
+											type="button"
+											class="cmd-line cmd-toggle"
+											aria-expanded={outputExpanded}
+											aria-controls={commandOutputId(item)}
+											title={outputExpanded ? 'Collapse command output' : 'Expand command output'}
+											onclick={() => toggleCommandOutput(item, output)}
 										>
-											{#if (item as any).status === 'completed'}
-												<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>
-											{:else if (item as any).status === 'failed'}
-												<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
-											{:else}
-												<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 8h3l2-4 3 8 2-4h2" /></svg>
-											{/if}
-										</span>
-									</div>
-									{#if (item as any)._out || (item as any).aggregatedOutput}
-										<pre class="cmd-out">{(item as any)._out || (item as any).aggregatedOutput}</pre>
+											<span class="gutter">$</span>
+											<span class="cmd-text">{displayCommand((item as any).command)}</span>
+											<span class="cmd-meta">
+												{#if commandOutputIsLong(output)}
+													<span class="cmd-output-count">{commandOutputCountLabel(output)}</span>
+												{/if}
+												{@render commandResult(item)}
+												<svg class="cmd-disclosure" class:expanded={outputExpanded} viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5" /></svg>
+											</span>
+										</button>
+										<div id={commandOutputId(item)} class="cmd-output-region" hidden={!outputExpanded}>
+											{#if outputExpanded}<pre class="cmd-out">{output}</pre>{/if}
+										</div>
+									{:else}
+										<div class="cmd-line">
+											<span class="gutter">$</span>
+											<span class="cmd-text">{displayCommand((item as any).command)}</span>
+											<span class="cmd-meta">{@render commandResult(item)}</span>
+										</div>
 									{/if}
 								</div>
 							{:else if item.type === 'fileChange'}
@@ -2333,13 +2404,13 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		padding: 0;
 		border: var(--rule-hair) solid var(--color-rule);
 		border-radius: var(--radius-input);
-		background: var(--color-paper);
+		background: transparent;
 		color: var(--color-ink);
 		cursor: pointer;
 		white-space: nowrap;
 		box-shadow: var(--shadow-card);
 		transition:
-			background-color var(--dur-micro) var(--ease-out),
+			color var(--dur-micro) var(--ease-out),
 			transform var(--dur-micro) var(--ease-out);
 	}
 
@@ -3331,8 +3402,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	.item {
 		display: grid;
-		grid-template-columns: minmax(3rem, auto) minmax(0, 1fr);
-		gap: var(--space-xs);
+		grid-template-columns: var(--space-sm) minmax(0, 1fr);
+		gap: var(--space-2xs);
 		align-items: start;
 		min-width: 0;
 	}
@@ -3353,6 +3424,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	.item.agent {
 		grid-template-columns: var(--space-md) minmax(0, 1fr);
+		gap: var(--space-xs);
 		padding: var(--space-3xs) var(--space-sm);
 		color: var(--color-ink);
 	}
@@ -3628,8 +3700,29 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		display: grid;
 		grid-template-columns: auto minmax(0, 1fr) auto;
 		gap: var(--space-2xs);
-		align-items: baseline;
+		align-items: center;
+		min-height: var(--control-height-compact);
 		padding: var(--space-2xs) var(--space-sm);
+	}
+
+	.cmd-toggle {
+		width: 100%;
+		border: 0;
+		border-radius: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		text-align: start;
+		cursor: pointer;
+	}
+
+	.cmd-toggle:focus-visible {
+		outline: 2px solid var(--color-focus);
+		outline-offset: -2px;
+	}
+
+	.cmd-toggle:active {
+		opacity: 0.72;
 	}
 
 	.item.cmd .gutter,
@@ -3666,8 +3759,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	.cmd-result {
-		display: grid;
-		place-items: center;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		flex: none;
 		width: var(--space-sm);
 		height: var(--space-sm);
 		color: var(--color-warning);
@@ -3690,6 +3785,37 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		stroke-linecap: round;
 		stroke-linejoin: round;
 		stroke-width: 1.75;
+	}
+
+	.cmd-meta {
+		display: inline-flex;
+		align-items: center;
+		justify-content: flex-end;
+		gap: var(--space-2xs);
+		min-height: var(--space-sm);
+	}
+
+	.cmd-output-count {
+		color: var(--color-muted);
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+		white-space: nowrap;
+	}
+
+	.cmd-disclosure {
+		flex: none;
+		width: var(--space-sm);
+		height: var(--space-sm);
+		fill: none;
+		stroke: var(--color-muted);
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 1.5;
+		transition: transform var(--dur-micro) var(--ease-in-out);
+	}
+
+	.cmd-disclosure.expanded {
+		transform: rotate(90deg);
 	}
 
 	.cmd-out {
@@ -4011,6 +4137,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	@media (hover: hover) and (pointer: fine) {
+		.cmd-toggle:hover .cmd-text {
+			color: var(--color-ink);
+		}
+
 		.delete-session {
 			opacity: 0;
 			pointer-events: none;
@@ -4027,8 +4157,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			background: var(--color-paper-2);
 		}
 
-		.sidebar-toggle:hover,
-		.drawer-close:hover,
 		.mini.ghost:hover,
 		.attach:hover,
 		.stop:hover,
@@ -4038,6 +4166,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.new-activity:hover,
 		.archive-toast button:hover {
 			background: var(--color-paper-3);
+		}
+
+		.sidebar-toggle:hover,
+		.drawer-close:hover {
+			background: transparent;
+			color: var(--color-accent-active);
 		}
 
 		.new:hover,
@@ -4164,7 +4298,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.topbar {
 			grid-template-columns: minmax(16rem, 1fr) auto auto;
 			gap: var(--space-2xs) var(--space-xs);
-			padding: calc(var(--space-xs) + env(safe-area-inset-top)) var(--space-sm) var(--space-xs) var(--space-lg);
+			padding: calc(var(--space-xs) + env(safe-area-inset-top)) var(--space-xs) var(--space-xs);
 		}
 
 		.app.rail-hidden .topbar {
@@ -4247,6 +4381,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	@media (pointer: coarse) {
+		.cmd-toggle {
+			min-height: var(--control-height);
+		}
+
 		.sidebar-toggle,
 		.drawer-close,
 		.new,

@@ -229,6 +229,84 @@ test('multi-session: create two, stream a reply, switch between them', async ({ 
 	await page.screenshot({ path: 'tests/yacwu.png', fullPage: true });
 });
 
+test('command activity aligns status and collapses long output', async ({ page }) => {
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
+
+	const textarea = page.locator('.composer textarea');
+	await textarea.fill('/shell printf short');
+	await page.locator('button.send').click();
+	const shortCommand = page.locator('.item.cmd').last();
+	await expect(shortCommand.locator('.cmd-toggle')).toHaveAttribute('aria-expanded', 'true');
+	await expect(shortCommand.locator('.cmd-out')).toContainText('short');
+
+	const centers = await shortCommand.evaluate((element) => {
+		const text = element.querySelector('.cmd-text')!.getBoundingClientRect();
+		const status = element.querySelector('.cmd-result')!.getBoundingClientRect();
+		return {
+			text: text.top + text.height / 2,
+			status: status.top + status.height / 2
+		};
+	});
+	expect(Math.abs(centers.text - centers.status)).toBeLessThanOrEqual(1);
+
+	await textarea.fill('/shell seq 1 30');
+	await page.locator('button.send').click();
+	const longCommand = page.locator('.item.cmd').last();
+	const toggle = longCommand.locator('.cmd-toggle');
+	await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+	await expect(toggle).toContainText('30 lines');
+	await expect(longCommand.locator('.cmd-out')).toHaveCount(0);
+	await expect(longCommand.locator('.cmd-output-region')).toBeHidden();
+
+	await toggle.focus();
+	await page.keyboard.press('Enter');
+	await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+	await expect(longCommand.locator('.cmd-out')).toContainText('30');
+	await page.keyboard.press('Space');
+	await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+	await page.setViewportSize({ width: 1440, height: 900 });
+	const collapseSidebar = page.locator('.drawer-close');
+	await expect(collapseSidebar).toBeVisible();
+	await collapseSidebar.hover();
+	await expect(collapseSidebar).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+	const desktopHeaderPadding = await page.locator('.topbar').evaluate((element) => {
+		const styles = getComputedStyle(element);
+		return { left: styles.paddingLeft, right: styles.paddingRight };
+	});
+	expect(desktopHeaderPadding).toEqual({ left: '12px', right: '12px' });
+	await page.locator('.transcript').click({ position: { x: 900, y: 500 } });
+	await page.screenshot({ path: 'artifacts/sidebar-header-refinement-desktop.png' });
+
+	for (const width of [320, 375, 414, 768]) {
+		await page.setViewportSize({ width, height: 780 });
+		const bounds = await longCommand.evaluate((element) => ({
+			rowRight: element.getBoundingClientRect().right,
+			clientWidth: document.documentElement.clientWidth,
+			scrollWidth: document.documentElement.scrollWidth
+		}));
+		expect(bounds.rowRight).toBeLessThanOrEqual(bounds.clientWidth);
+		expect(bounds.scrollWidth).toBe(bounds.clientWidth);
+		if (width === 375) {
+			const sidebar = page.locator('#session-sidebar');
+			const expandSidebar = page.locator('.header-menu');
+			await expect(expandSidebar).toBeVisible();
+			if ((await expandSidebar.getAttribute('aria-expanded')) === 'true') {
+				await expandSidebar.evaluate((element) => (element as HTMLButtonElement).click());
+			}
+			await expect(expandSidebar).toHaveAttribute('aria-expanded', 'false');
+			await expect(sidebar).not.toHaveClass(/open/);
+			await expect.poll(() => sidebar.evaluate((element) => element.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
+			await expect(expandSidebar).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+			await expandSidebar.evaluate((element) => (element as HTMLButtonElement).blur());
+			await page.screenshot({ path: 'artifacts/sidebar-header-refinement-mobile.png' });
+		}
+	}
+});
+
 test('new session can target a specific working directory', async ({ page }) => {
 	await page.goto('/');
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
