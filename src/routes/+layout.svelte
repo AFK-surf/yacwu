@@ -1823,15 +1823,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 <svelte:window onkeydown={onWindowKeydown} />
 
-{#snippet codexMark()}
-	<img
-		class="codex-mark"
-		src="/icons/codex-openai.svg"
-		alt="Codex"
-		title="Codex"
-	/>
-{/snippet}
-
 {#snippet fastMark()}
 	<span class="fast-mark" role="img" aria-label="Fast mode enabled" title="Fast mode enabled">
 		<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -2398,7 +2389,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								</div>
 							{:else if item.type === 'agentMessage'}
 								<div class="item agent">
-									{@render codexMark()}
 									<div class="body media-body">
 									{#each agentParts((item as any).text ?? '') as part}
 										{#if part.type === 'text'}
@@ -2550,7 +2540,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					<div class="transcript-spacer" style={`height: ${virtualTranscript.after}px`}></div>
 					{#if active?.status === 'running'}
 						<div class="item agent pending">
-							{@render codexMark()}
 							<div class="body">Working…</div>
 						</div>
 					{/if}
@@ -3845,21 +3834,15 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	.item.agent {
-		grid-template-columns: var(--space-md) minmax(0, 1fr);
-		gap: var(--space-xs);
+		grid-template-columns: minmax(0, 1fr);
+		gap: 0;
 		padding: var(--space-3xs) var(--space-sm);
 		color: var(--color-ink);
 	}
 
-	.codex-mark {
-		display: block;
-		width: var(--space-md);
-		height: var(--space-md);
-		object-fit: contain;
-	}
-
 	.item.agent .body {
-		max-width: var(--measure-prose);
+		width: 100%;
+		max-width: none;
 		font-family: var(--font-display);
 		font-size: var(--text-md);
 		font-style: normal;

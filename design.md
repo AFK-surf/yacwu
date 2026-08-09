@@ -47,7 +47,7 @@ Coral is reserved for primary actions, current-location marks, focus, and small 
 ## Message identity
 
 - User prompts are unlabelled; their tinted surface is the identity cue.
-- Codex messages use the vendored Codex (OpenAI) mark at `/static/icons/codex-openai.svg` with an accessible name, never a text transcript label.
+- Codex messages use no avatar or text label; their content spans the full transcript row.
 - Codex replies render GitHub-flavored Markdown on the client through structured tokens; raw HTML is inert and user prompts remain plain text.
 - The composer keeps a single row with icon-only attach and send controls at every width. Their accessible names remain available to assistive technology.
 

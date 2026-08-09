@@ -361,6 +361,55 @@ test('web search activity renders its action, query, and result count', async ({
 	await expect(search.locator('.web-search-icon svg')).toBeVisible();
 });
 
+test('Codex messages use the full row without a logo', async ({ page }) => {
+	await page.route('**/api/threads/*/open', async (route) => {
+		const id = new URL(route.request().url()).pathname.split('/')[3];
+		await route.fulfill({
+			json: {
+				thread: {
+					id,
+					turns: [
+						{
+							id: 'turn-agent-layout',
+							status: 'completed',
+							items: [
+								{
+									type: 'agentMessage',
+									id: 'agent-layout',
+									text: 'A full-width Codex response.'
+								}
+							]
+						}
+					]
+				}
+			}
+		});
+	});
+
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
+
+	const message = page.locator('.item.agent').first();
+	await expect(message).toContainText('A full-width Codex response.');
+	await expect(message.locator('.codex-mark')).toHaveCount(0);
+	const geometry = await message.evaluate((element) => {
+		const body = element.querySelector('.body')!;
+		const rowRect = element.getBoundingClientRect();
+		const bodyRect = body.getBoundingClientRect();
+		const style = getComputedStyle(element);
+		return {
+			bodyLeft: bodyRect.left,
+			bodyRight: bodyRect.right,
+			contentLeft: rowRect.left + Number.parseFloat(style.paddingLeft),
+			contentRight: rowRect.right - Number.parseFloat(style.paddingRight)
+		};
+	});
+	expect(Math.abs(geometry.bodyLeft - geometry.contentLeft)).toBeLessThanOrEqual(1);
+	expect(Math.abs(geometry.bodyRight - geometry.contentRight)).toBeLessThanOrEqual(1);
+});
+
 test('side-chat delete unsubscribes without archiving and stays deleted after reload', async ({
 	page
 }) => {
