@@ -537,6 +537,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		newCwd = '';
 		newProfile = '';
 		creating = true;
+		// The create form lives in the session rail; surface it if it's hidden
+		// (welcome-screen CTA on mobile, or desktop with the rail collapsed).
+		if (mobileViewport) {
+			mobileSidebarOpen = true;
+		} else if (desktopSidebarHidden) {
+			desktopSidebarHidden = false;
+			localStorage.setItem('yacwu-sidebar-hidden', 'false');
+		}
 		// Always re-fetch: the backend reads profile files fresh from disk.
 		fetch('/api/profiles')
 			.then((r) => r.json())
@@ -554,7 +562,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	async function openSidebar() {
 		mobileSidebarOpen = true;
 		await tick();
-		const target = sidebarEl?.querySelector<HTMLElement>('.session.active, .new, a, button:not(:disabled)');
+		const target =
+			sidebarEl?.querySelector<HTMLElement>('.session.active') ??
+			sidebarEl?.querySelector<HTMLElement>('.new') ??
+			sidebarEl?.querySelector<HTMLElement>('a, button:not(:disabled)');
 		target?.focus();
 	}
 
@@ -1711,7 +1722,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			{#if block.ordered}
 				<ol start={block.start ?? 1}>
 					{#each block.items as item}
-						<li>
+						<li class:task={item.checked !== null}>
 							{#if item.checked !== null}<input type="checkbox" checked={item.checked} disabled aria-label={item.checked ? 'Completed' : 'Not completed'} />{/if}
 							{@render markdownBlocks(item.children)}
 						</li>
@@ -1720,7 +1731,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			{:else}
 				<ul>
 					{#each block.items as item}
-						<li>
+						<li class:task={item.checked !== null}>
 							{#if item.checked !== null}<input type="checkbox" checked={item.checked} disabled aria-label={item.checked ? 'Completed' : 'Not completed'} />{/if}
 							{@render markdownBlocks(item.children)}
 						</li>
@@ -1810,10 +1821,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					{/if}
 				</svg>
 			</button>
-			<a class="brand-home" href="/" aria-label="yacwu home">
-				<span class="brand-symbol" aria-hidden="true">y</span>
-				<span class="brand-name">yacwu</span>
-			</a>
 			<span class="connection" title={connected ? 'Connected to Codex' : 'Disconnected from Codex'}>
 				<span class="dot" class:on={connected}></span>
 				<span>{connected ? 'Online' : 'Offline'}</span>
@@ -2171,6 +2178,15 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				<div class="transcript" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
 					{#if loadingHistory}
 						<div class="sys">loading history…</div>
+					{:else if activeItems.length === 0 && active?.status !== 'running' && !active?.error}
+						<div class="transcript-empty">
+							<p class="transcript-empty-lede">This session is ready.</p>
+							<p class="transcript-empty-hint">
+								Describe what you want done in
+								<strong>{workspaceLabel(cwds[activeId] ?? activeSummary?.cwd)}</strong>, or type
+								<code>/</code> for a command.
+							</p>
+						</div>
 					{/if}
 					<div class="transcript-spacer" style={`height: ${virtualTranscript.before}px`}></div>
 					{#each virtualTranscript.items as item (item.id)}
@@ -2605,9 +2621,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	.brand {
-		display: grid;
-		grid-template-columns: auto minmax(0, 1fr) auto;
+		display: flex;
 		align-items: center;
+		justify-content: space-between;
 		gap: var(--space-sm);
 		min-height: var(--rail-header-height);
 		padding: var(--space-xs) var(--space-sm);
@@ -2625,38 +2641,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		background: transparent;
 		color: var(--color-ink);
 		cursor: pointer;
-	}
-
-	.brand-home {
-		display: inline-flex;
-		align-items: center;
-		gap: var(--space-xs);
-		min-width: 0;
-		color: var(--color-ink);
-		text-decoration: none;
-		white-space: nowrap;
-	}
-
-	.brand-symbol {
-		display: grid;
-		place-items: center;
-		width: var(--space-md);
-		height: var(--space-md);
-		border-radius: var(--radius-sm);
-		background: var(--color-accent);
-		color: var(--color-accent-ink);
-		font-family: var(--font-display);
-		font-size: var(--text-md);
-		font-weight: var(--display-weight);
-		line-height: 1;
-	}
-
-	.brand-name {
-		font-family: var(--font-display);
-		font-size: var(--text-lg);
-		font-weight: var(--display-weight);
-		letter-spacing: var(--tracking-display);
-		line-height: 1;
 	}
 
 	.connection {
@@ -3029,7 +3013,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		gap: var(--space-xl);
 		width: min(100%, var(--measure-reading));
 		max-height: 100%;
-		margin: 0 auto;
+		/* Block-auto margins center the welcome in the viewport; they collapse
+		   to 0 when the content is taller than the screen. */
+		margin: auto;
 		padding: calc(var(--space-2xl) + env(safe-area-inset-top)) var(--space-md) var(--space-xl);
 		overflow-y: auto;
 	}
@@ -3558,6 +3544,51 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		font-size: var(--text-sm);
 	}
 
+	.transcript-empty {
+		display: grid;
+		align-content: center;
+		justify-items: center;
+		gap: var(--space-2xs);
+		width: min(100%, var(--measure-reading));
+		min-height: 100%;
+		margin-inline: auto;
+		padding-block-end: var(--space-2xl);
+		text-align: center;
+	}
+
+	.transcript-empty p {
+		margin: 0;
+	}
+
+	.transcript-empty-lede {
+		color: var(--color-ink-2);
+		font-family: var(--font-display);
+		font-size: var(--text-lg);
+		font-weight: var(--display-weight);
+		letter-spacing: var(--tracking-display);
+	}
+
+	.transcript-empty-hint {
+		max-width: var(--measure-lede);
+		color: var(--color-muted);
+		font-size: var(--text-sm);
+		line-height: 1.5;
+	}
+
+	.transcript-empty-hint strong {
+		color: var(--color-neutral);
+		font-weight: 600;
+	}
+
+	.transcript-empty-hint code {
+		padding: 0 var(--space-3xs);
+		border: var(--rule-hair) solid var(--color-rule);
+		border-radius: var(--radius-xs);
+		background: var(--color-paper-2);
+		font-family: var(--font-outlier);
+		font-size: 0.85em;
+	}
+
 	.item {
 		display: grid;
 		grid-template-columns: var(--space-sm) minmax(0, 1fr);
@@ -3574,6 +3605,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	.item.user {
 		display: block;
+		/* Size to the prompt, matching the agent's prose measure, instead of
+		   stretching a short line across the full reading column. */
+		width: fit-content;
+		min-width: min(100%, 16rem);
+		max-width: min(100%, var(--measure-prose));
 		padding: var(--space-xs) var(--space-sm);
 		border-radius: var(--radius-input);
 		background: var(--color-paper-3);
@@ -3656,6 +3692,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		padding-inline-start: var(--space-3xs);
 	}
 
+	/* Task-list items: the checkbox replaces the bullet, GitHub-style. */
+	.markdown-body li.task {
+		list-style: none;
+	}
+
 	.markdown-body li > p {
 		display: inline;
 	}
@@ -3663,6 +3704,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.markdown-body input[type='checkbox'] {
 		margin: 0 var(--space-2xs) 0 0;
 		accent-color: var(--color-accent-active);
+		vertical-align: middle;
 	}
 
 	.markdown-body blockquote {
@@ -3824,6 +3866,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		color: var(--color-neutral);
 	}
 
+	/* Gutter glyphs are a size down from their body text; share the first
+	   baseline so the pair doesn't sit visibly askew. */
+	.item.reason,
+	.item.plan,
+	.item.note,
+	.item.review,
+	.item.subagent,
+	.item.generic,
+	.item.err {
+		align-items: baseline;
+	}
+
 	.item.reason .body {
 		font-style: italic;
 	}
@@ -3932,8 +3986,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		font-family: var(--font-outlier);
 	}
 
+	/* The $ prompt shares the command's type size so the centered pair can't
+	   drift apart vertically. */
 	.item.cmd .gutter {
 		color: var(--color-warning);
+		font-size: var(--text-sm);
 	}
 
 	.cmd-text {
@@ -4078,6 +4135,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		font-size: var(--text-sm);
 	}
 
+	/* Slash-command echoes and their output are TUI-style text whose column
+	   alignment (/help, /status) depends on a fixed-pitch face. */
+	.item.note .body,
+	.item.generic .body {
+		font-family: var(--font-outlier);
+		line-height: 1.5;
+	}
+
 	.item.note.err,
 	.item.err {
 		padding: var(--space-xs) var(--space-sm);
@@ -4187,7 +4252,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		grid-area: message;
 		min-height: var(--control-height);
 		max-height: min(9rem, 36dvh);
-		padding: var(--space-2xs) var(--space-xs);
+		/* Block padding centers a single 1.4em line inside the control height,
+		   so the placeholder and caret sit flush with the attach/send icons. */
+		padding: calc((var(--control-height) - 1.4em) / 2) var(--space-xs);
 		border-color: transparent;
 		background: transparent;
 		font-family: var(--font-body);
@@ -4386,7 +4453,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			color: var(--color-ink);
 		}
 
-		.brand-home:hover .brand-name,
 		.message-image:hover {
 			color: var(--color-accent-active);
 		}
@@ -4408,20 +4474,17 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		transform: translateY(1px);
 	}
 
-	.new-activity:active,
-	.archive-toast button:active {
+	/* .new-activity is normally lifted above the composer; :active keeps the
+	   lift and adds the shared 1px press. */
+	.new-activity:active {
 		transform: translateY(calc(-100% - var(--space-2xs) + 1px));
 	}
 
-	.archive-toast button:active {
-		transform: translateY(1px);
-	}
-
+	.archive-toast button:active,
 	.delete-session:active {
 		transform: translateY(1px);
 	}
 
-	.brand-home:active,
 	.message-image:active {
 		opacity: 0.72;
 	}
@@ -4573,6 +4636,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			width: var(--control-height-compact);
 			min-width: var(--control-height-compact);
 			height: var(--control-height-compact);
+		}
+
+		textarea {
+			padding-block: calc((var(--control-height-compact) - 1.4em) / 2);
 		}
 
 		.session {
