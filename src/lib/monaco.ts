@@ -45,6 +45,9 @@ async function load(): Promise<Monaco> {
 		);
 	});
 	defineTheme(monaco);
+	// Grammars Monaco lacks (TOML, Gleam) live in their own lazy chunk.
+	const { registerExtraLanguages } = await import('$lib/monaco-grammars');
+	registerExtraLanguages(monaco);
 	return monaco;
 }
 
@@ -68,7 +71,10 @@ function defineTheme(monaco: Monaco) {
 			{ token: 'keyword', foreground: '9a3d1d' },
 			{ token: 'string', foreground: '5c6e3c' },
 			{ token: 'number', foreground: '7a4a9e' },
-			{ token: 'type', foreground: '2f5d8a' }
+			{ token: 'type', foreground: '2f5d8a' },
+			{ token: 'key', foreground: '2f5d8a' },
+			{ token: 'constant', foreground: '7a4a9e' },
+			{ token: 'annotation', foreground: '8a8071' }
 		],
 		colors: {
 			'editor.background': '#faf8f1',

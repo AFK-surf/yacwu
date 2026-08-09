@@ -1625,6 +1625,28 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		filesReveal = { path: rel, nonce: ++localCounter };
 	}
 
+	/**
+	 * The session-relative path to open when a code span in a Codex message
+	 * looks like a workspace file, or null to leave it plain. Requires a
+	 * directory separator so identifiers like `next.access_token` stay text;
+	 * a trailing :line(:col) suffix is stripped; absolute paths must sit
+	 * inside the session's working directory.
+	 */
+	function agentPathTarget(text: string): string | null {
+		if (!activeId) return null;
+		let candidate = text.trim();
+		const withLine = candidate.match(/^(.*?):\d+(?::\d+)?$/);
+		if (withLine) candidate = withLine[1];
+		if (candidate.startsWith('/')) {
+			const cwd = (cwds[activeId] ?? activeSummary?.cwd)?.replace(/[\\/]+$/, '');
+			if (!cwd || !candidate.startsWith(`${cwd}/`)) return null;
+			candidate = candidate.slice(cwd.length + 1);
+		} else if (candidate.startsWith('./')) {
+			candidate = candidate.slice(2);
+		}
+		return /^[\w.@+-]+(?:\/[\w.@+-]+)+$/.test(candidate) ? candidate : null;
+	}
+
 	function displayFileChangePath(ch: any): string {
 		const path = fileChangePath(ch);
 		const cwd = activeId ? (cwds[activeId] ?? activeSummary?.cwd) : null;
@@ -1884,7 +1906,17 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		{:else if token.type === 'del'}
 			<del>{@render markdownInlines(token.children)}</del>
 		{:else if token.type === 'code'}
-			<code>{token.text}</code>
+			{@const pathTarget = agentPathTarget(token.text)}
+			{#if pathTarget !== null}
+				<button
+					type="button"
+					class="code-path"
+					title="Open in file browser"
+					onclick={() => openFileInBrowser(pathTarget)}
+				><code>{token.text}</code></button>
+			{:else}
+				<code>{token.text}</code>
+			{/if}
 		{:else if token.type === 'break'}
 			<br />
 		{:else if token.type === 'link'}
@@ -3998,6 +4030,31 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		background: var(--color-paper-3);
 		font-family: var(--font-outlier);
 		font-size: 0.78em;
+	}
+
+	/* Code spans that resolve to workspace files open the file browser. */
+	.markdown-body .code-path {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+		font: inherit;
+		text-align: start;
+	}
+
+	.markdown-body .code-path code {
+		text-decoration: underline;
+		text-decoration-color: var(--color-rule-2);
+		text-decoration-thickness: var(--rule-hair);
+		text-underline-offset: var(--space-3xs);
+		transition: color var(--dur-micro) var(--ease-out);
+	}
+
+	.markdown-body .code-path:hover code,
+	.markdown-body .code-path:focus-visible code {
+		color: var(--color-accent-active);
+		text-decoration-color: currentColor;
 	}
 
 	.markdown-code {
