@@ -78,6 +78,19 @@
 	// The active session is whatever is in the URL (/s/<id>); / shows the welcome.
 	const activeId = $derived(page.params.id ?? null);
 	const active = $derived(activeId ? threads[activeId] : null);
+	const activeSummary = $derived(sessions.find((s) => s.id === activeId) ?? null);
+	// Side chats (ephemeral /btw forks) nest under their parent in the sidebar.
+	// Orphans — whose parent was archived or isn't listed — stay top-level so
+	// they remain reachable.
+	const topSessions = $derived(
+		sessions.filter(
+			(s) => !isSideChat(s) || !sessions.some((p) => p.id === s.forkedFromId)
+		)
+	);
+	const activeIsSide = $derived(Boolean(activeSummary && isSideChat(activeSummary)));
+	const activeParent = $derived(
+		activeIsSide ? (sessions.find((s) => s.id === activeSummary?.forkedFromId) ?? null) : null
+	);
 	const composerPlaceholder = $derived(
 		mobileViewport ? 'message codex' : 'message codex…  (Enter to send, Shift+Enter for newline)'
 	);
@@ -161,7 +174,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			name: thr.name ?? null,
 			createdAt: thr.createdAt ?? now,
 			updatedAt: thr.updatedAt ?? thr.createdAt ?? now,
-			cwd: thr.cwd
+			cwd: thr.cwd,
+			forkedFromId: thr.forkedFromId ?? null,
+			ephemeral: thr.ephemeral ?? false
 		};
 		sessions = [summary, ...sessions.filter((s) => s.id !== thr.id)];
 	}
@@ -380,8 +395,32 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			const data = await res.json();
 			sessions = data.data ?? [];
 			defaultCwd = data.defaultCwd ?? '';
+			await recoverSideChats();
 		} finally {
 			sessionsLoaded = true;
+		}
+	}
+
+	// Ephemeral side chats are never persisted, so thread/list omits them.
+	// Re-attach any still loaded in codex memory to their parent sessions.
+	async function recoverSideChats() {
+		try {
+			const res = await fetch('/api/threads/loaded');
+			const data = await res.json();
+			const loaded: string[] = data.data ?? [];
+			const missing = loaded.filter((id) => !sessions.some((s) => s.id === id));
+			for (const id of missing) {
+				try {
+					const res = await fetch(`/api/threads/${id}`);
+					const data = await res.json();
+					const thr = data.thread;
+					if (thr?.ephemeral && thr?.forkedFromId) upsertSession(thr);
+				} catch {
+					/* unreadable thread — skip */
+				}
+			}
+		} catch {
+			/* loaded list unavailable — skip recovery */
 		}
 	}
 
@@ -837,6 +876,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			}
 
 			case 'btw': {
+				if (isSideChat(sessions.find((s) => s.id === id))) {
+					addLocalNote(id, 'already in a side conversation — go back first', 'err');
+					break;
+				}
 				const { ok, data } = await postCmd(id, 'fork', {
 					ephemeral: true,
 					developerInstructions: BTW_DEVELOPER_INSTRUCTIONS
@@ -846,7 +889,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					break;
 				}
 				const sideId: string = data.thread.id;
-				upsertSession(data.thread);
+				upsertSession({ ...data.thread, forkedFromId: id, ephemeral: true });
 				ensureThread(sideId);
 				addLocalNote(id, `side conversation started: ${sideId.slice(0, 8)}`);
 				if (parsed.message) {
@@ -1004,6 +1047,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		return s.id.slice(0, 8);
 	}
 
+	function isSideChat(s: ThreadSummary | null | undefined): boolean {
+		return Boolean(s?.ephemeral && s?.forkedFromId);
+	}
+
+	function sideChatsOf(parentId: string): ThreadSummary[] {
+		return sessions.filter((s) => isSideChat(s) && s.forkedFromId === parentId);
+	}
+
 	function fileChangeKind(ch: any): string {
 		const kind = ch?.kind;
 		if (typeof kind === 'string' && kind.trim()) return kind;
@@ -1134,7 +1185,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			<button class="new" onclick={startCreating}>+ new session</button>
 		{/if}
 		<nav class="sessions" data-loaded={sessionsLoaded}>
-			{#each sessions as s (s.id)}
+			{#each topSessions as s (s.id)}
 				<div class="session-row">
 					<a
 						class="session"
@@ -1144,7 +1195,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						onclick={() => (mobileSidebarOpen = false)}
 					>
 						<span class="run-dot" class:running={threads[s.id]?.status === 'running'}></span>
-						<span class="label">{shortLabel(s)}</span>
+						<span class="label">{#if isSideChat(s)}⎇ {/if}{shortLabel(s)}</span>
 						{#if s.cwd}<span class="cwd">{s.cwd}</span>{/if}
 					</a>
 					<button
@@ -1156,11 +1207,33 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						×
 					</button>
 				</div>
+				{#each sideChatsOf(s.id) as side (side.id)}
+					<div class="session-row side-row">
+						<a
+							class="session side"
+							class:active={side.id === activeId}
+							data-id={side.id}
+							href={`/s/${side.id}`}
+							onclick={() => (mobileSidebarOpen = false)}
+						>
+							<span class="run-dot" class:running={threads[side.id]?.status === 'running'}></span>
+							<span class="label">⎇ {shortLabel(side)}</span>
+						</a>
+						<button
+							class="delete-session"
+							type="button"
+							aria-label={`delete session ${shortLabel(side)}`}
+							onclick={() => deleteSession(side.id)}
+						>
+							×
+						</button>
+					</div>
+				{/each}
 			{:else}
 				<div class="empty">no sessions yet</div>
 			{/each}
 		</nav>
-		<div class="hint">{sessions.length} session{sessions.length === 1 ? '' : 's'}</div>
+		<div class="hint">{topSessions.length} session{topSessions.length === 1 ? '' : 's'}</div>
 	</aside>
 
 	<main class="chat">
@@ -1177,6 +1250,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			</div>
 		{:else}
 			<div class="topbar">
+				{#if activeParent}
+					<span class="tid dim">{activeParent.id.slice(0, 8)}</span>
+					<span class="tid-sep">⎇</span>
+				{/if}
 				<span class="tid">{activeId.slice(0, 8)}</span>
 				{#if cwds[activeId]}<span class="meta">{cwds[activeId]}</span>{/if}
 				{#if active?.goal}
@@ -1200,6 +1277,20 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					{/if}
 				</div>
 			</div>
+
+			{#if activeIsSide}
+				<div class="side-banner">
+					<span class="side-banner-label">⎇ side conversation · ephemeral — not saved</span>
+					<span class="spacer"></span>
+					{#if activeParent}
+						<button class="mini ghost" onclick={() => goto(`/s/${activeParent.id}`)}>
+							← {shortLabel(activeParent)}
+						</button>
+					{:else}
+						<span class="meta">parent unavailable</span>
+					{/if}
+				</div>
+			{/if}
 
 			{#if active?.goal}
 				<div class="goal-tracker" aria-label="active goal">
@@ -1668,6 +1759,27 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	.session-row.side-row .session {
+		padding-left: 26px;
+	}
+	.session.side .label {
+		font-style: italic;
+		opacity: 0.85;
+	}
+	.side-banner {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 6px 18px;
+		border-bottom: 1px solid var(--border);
+		background: var(--bg-alt);
+		font-size: 12px;
+		color: var(--fg-dim);
+	}
+	.side-banner .meta {
+		color: var(--fg-dim);
+		opacity: 0.7;
+	}
 	.delete-session {
 		position: absolute;
 		top: 6px;
@@ -1752,6 +1864,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		font-size: 12px;
 	}
 	.topbar .tid {
+		color: var(--accent);
+	}
+	.topbar .tid.dim {
+		color: var(--fg-dim);
+	}
+	.topbar .tid-sep {
 		color: var(--accent);
 	}
 	.topbar .meta {

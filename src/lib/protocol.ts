@@ -16,6 +16,10 @@ export interface ThreadSummary {
 	updatedAt: number;
 	cwd?: string;
 	status?: { type: string };
+	/** Source thread id when this thread was created by forking another. */
+	forkedFromId?: string | null;
+	/** Ephemeral threads (side conversations) are never persisted. */
+	ephemeral?: boolean;
 }
 
 export interface TextContent {

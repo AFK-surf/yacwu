@@ -126,6 +126,8 @@ fn dispatch(
     ["api", "threads", id, "profile"], Post -> post_profile(ctx, req, id)
     ["api", "threads"], Get -> list_threads(ctx)
     ["api", "threads"], Post -> create_thread(ctx, req)
+    ["api", "threads", "loaded"], Get -> loaded_threads(ctx)
+    ["api", "threads", id], Get -> read_thread(ctx, id)
     ["api", "threads", id, "open"], Post -> open_thread(ctx, req, id)
     ["api", "threads", id, "message"], Post -> message(ctx, req, id)
     ["api", "threads", id, "interrupt"], Post -> interrupt(ctx, req, id)
@@ -525,6 +527,24 @@ fn list_threads(ctx: Context) -> Response(ResponseData) {
       )
     Error(message) -> json_response(500, error_body(message))
   }
+}
+
+/// List thread ids currently loaded in codex memory. Ephemeral side chats
+/// never appear in thread/list, so the UI uses this to re-attach them.
+fn loaded_threads(ctx: Context) -> Response(ResponseData) {
+  rpc(ctx, "thread/loaded/list", json.object([]))
+}
+
+/// Read one thread's metadata without loading it or including turns.
+fn read_thread(ctx: Context, thread_id: String) -> Response(ResponseData) {
+  rpc(
+    ctx,
+    "thread/read",
+    json.object([
+      #("threadId", json.string(thread_id)),
+      #("includeTurns", json.bool(False)),
+    ]),
+  )
 }
 
 /// Create a new thread (session), optionally in a specific working directory.
