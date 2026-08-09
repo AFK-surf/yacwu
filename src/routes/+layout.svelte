@@ -14,6 +14,7 @@
 		type Turn
 	} from '$lib/protocol';
 	import { parseSlash, SLASH_HELP } from '$lib/slash';
+	import { ComposerHistory } from '$lib/history';
 	import { parseCodexMarkdown, type MarkdownBlock, type MarkdownInline } from '$lib/markdown';
 
 	let { children } = $props();
@@ -110,6 +111,8 @@
 	let transcriptHeightVersion = $state(0);
 	let commandOutputExpanded = $state<Record<string, boolean>>({});
 	const rowHeights = new Map<string, number>();
+	// Per-session Up/Down message recall (codex TUI semantics; see $lib/history).
+	const composerHistories = new Map<string, ComposerHistory>();
 	const ESTIMATED_ROW_HEIGHT = 72;
 	const VIRTUAL_OVERSCAN_PX = 700;
 	const COMMAND_OUTPUT_COLLAPSE_LINES = 10;
@@ -245,6 +248,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		delete fastSessions[id];
 		persistFastSessions();
 		delete cwds[id];
+		composerHistories.delete(id);
 		for (const key of Object.keys(commandOutputExpanded)) {
 			if (key.startsWith(`${id}:`)) delete commandOutputExpanded[key];
 		}
@@ -646,6 +650,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			conflict = null;
 			unseenActivity = false;
 			if (!id) return;
+			// Stale browsing state must not leak across visits to a session.
+			composerHistories.get(id)?.resetNavigation();
 			void loadSessionConfig(id);
 			const t = ensureThread(id);
 			if (t.order.length > 0) {
@@ -769,6 +775,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		// mirroring the Codex TUI. Everything else is a normal model turn.
 		if (text.startsWith('/') && images.length === 0) {
 			input = '';
+			composerHistoryOf(id).record(text);
 			await handleSlash(id, text);
 			return;
 		}
@@ -786,6 +793,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 			if (input === draftInput) input = '';
 			if (selectedImages === draftImages) selectedImages = [];
+			composerHistoryOf(id).record(text);
 		} catch (err) {
 			t.status = 'idle';
 			addLocalNote(id, err instanceof Error ? err.message : 'failed to send message', 'err');
@@ -1237,7 +1245,62 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		if (e.key === 'Enter' && !e.shiftKey && !mobileViewport) {
 			e.preventDefault();
 			send();
+			return;
 		}
+		if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.isComposing) {
+			handleHistoryNavigation(e);
+		}
+	}
+
+	// Prior user messages for a resumed thread, oldest first — the seed for
+	// Up/Down recall (the codex TUI's replayed-submission history).
+	function transcriptUserTexts(id: string): string[] {
+		const t = threads[id];
+		if (!t) return [];
+		const texts: string[] = [];
+		for (const itemId of t.order) {
+			const item = t.byId[itemId] as any;
+			if (item?.type !== 'userMessage') continue;
+			const text = ((item.content ?? []) as any[])
+				.map((c) => (typeof c?.text === 'string' ? c.text : ''))
+				.filter(Boolean)
+				.join('\n')
+				.trim();
+			if (text) texts.push(text);
+		}
+		return texts;
+	}
+
+	function composerHistoryOf(id: string): ComposerHistory {
+		let history = composerHistories.get(id);
+		if (!history) {
+			history = new ComposerHistory();
+			composerHistories.set(id, history);
+		}
+		if (history.isEmpty) history.seed(transcriptUserTexts(id));
+		return history;
+	}
+
+	function handleHistoryNavigation(e: KeyboardEvent) {
+		if (!activeId || !composerTextareaEl) return;
+		if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+		// A live selection means the arrows should collapse it, not recall.
+		if (composerTextareaEl.selectionStart !== composerTextareaEl.selectionEnd) return;
+
+		const history = composerHistoryOf(activeId);
+		if (!history.shouldHandleNavigation(input, composerTextareaEl.selectionStart)) return;
+
+		const nav = e.key === 'ArrowUp' ? history.navigateUp() : history.navigateDown();
+		if (nav.kind === 'ignored') return;
+		e.preventDefault();
+		input = nav.kind === 'recall' ? nav.text : '';
+		// Recall places the caret at the end, like shell history.
+		void tick().then(() => {
+			if (!composerTextareaEl) return;
+			resizeComposer();
+			const end = composerTextareaEl.value.length;
+			composerTextareaEl.setSelectionRange(end, end);
+		});
 	}
 
 	function resizeComposer() {
@@ -2440,7 +2503,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							</svg>
 						</button>
 					</div>
-					<div class="composer-hint">Enter to send · Shift+Enter for a new line · Slash commands supported</div>
+					<div class="composer-hint">Enter to send · Shift+Enter for a new line · ↑ for history · Slash commands supported</div>
 				</div>
 			{/if}
 		{/if}

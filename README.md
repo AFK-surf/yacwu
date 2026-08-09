@@ -17,6 +17,8 @@ state lives entirely in Codex's own persistent sessions, read back via
   already has loaded (so two processes don't corrupt one conversation)
 - ⚡ Live streaming of agent messages, reasoning, command runs, file changes & plans
 - ⌨️ Slash commands mirroring the Codex TUI (see below)
+- ⌨️ Up/Down message history in the composer, with the Codex TUI's shell-style
+  recall semantics (a resumed thread seeds history from its prior prompts)
 - 🎛️ Per-session codex profiles: pick a `$CODEX_HOME/<name>.config.toml` when
   creating a session (or with `/profile`)
 - 🔌 Single `codex app-server` process multiplexed over one connection; events
