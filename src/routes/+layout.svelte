@@ -118,6 +118,10 @@
 	let commandOutputExpanded = $state<Record<string, boolean>>({});
 	// Per-message toggle between rendered and raw Markdown for Codex replies.
 	let agentRawShown = $state<Record<string, boolean>>({});
+	// Touch devices have no hover: a tap on a message stands in for it,
+	// revealing that message's raw-Markdown toggle until a tap elsewhere.
+	let hoverPointer = $state(true);
+	let tappedAgentKey = $state<string | null>(null);
 	const rowHeights = new Map<string, number>();
 	// Per-session Up/Down message recall (codex TUI semantics; see $lib/history).
 	const composerHistories = new Map<string, ComposerHistory>();
@@ -216,7 +220,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		return threads[id];
 	}
 
-	function upsertItem(id: string, item: ThreadItem & { id: string }) {
+	function upsertItem(id: string, item: ThreadItem & { id: string }, stampTime = false) {
 		const t = ensureThread(id);
 		if (!t.byId[item.id]) t.order.push(item.id);
 		// Preserve any locally-accumulated streamed text across updates.
@@ -226,6 +230,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			if (next.text === '' && prev.text) next.text = prev.text;
 			if (next._reason === undefined && prev._reason) next._reason = prev._reason;
 			if (next._out === undefined && prev._out) next._out = prev._out;
+			if (next._at === undefined && prev._at) next._at = prev._at;
+		} else if (stampTime) {
+			// The protocol has no per-item timestamps; live items are stamped
+			// with arrival time. Restored history stays unstamped.
+			next._at = Date.now();
 		}
 		t.byId[item.id] = next;
 	}
@@ -350,7 +359,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			}
 			case 'item/started':
 			case 'item/completed': {
-				if (tid && p.item?.id) upsertItem(tid, p.item);
+				if (tid && p.item?.id) upsertItem(tid, p.item, true);
 				// The file browser refreshes what it is showing when the agent
 				// touches files in the viewed session.
 				if (tid === activeId && p.item?.type === 'fileChange') filesRefresh += 1;
@@ -1726,6 +1735,28 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		agentRawShown[key] = !agentRawShown[key];
 	}
 
+	function agentTime(item: any): { label: string; iso: string; full: string } | null {
+		const at = (item as any)._at;
+		if (typeof at !== 'number') return null;
+		const date = new Date(at);
+		return {
+			label: date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+			iso: date.toISOString(),
+			full: date.toLocaleString()
+		};
+	}
+
+	function onAgentMessageTap(item: any) {
+		if (hoverPointer) return;
+		tappedAgentKey = agentRawKey(item);
+	}
+
+	function onWindowClick(e: MouseEvent) {
+		if (hoverPointer || tappedAgentKey === null) return;
+		const target = e.target as Element | null;
+		if (!target?.closest?.('.item.agent')) tappedAgentKey = null;
+	}
+
 	function commandOutputStateKey(item: any): string {
 		return `${activeId ?? 'none'}:${String(item.id ?? '')}`;
 	}
@@ -1865,6 +1896,13 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			mobileViewport = mobileQuery.matches;
 			if (!mobileViewport) mobileSidebarOpen = false;
 		};
+		const hoverQuery = window.matchMedia('(hover: hover) and (pointer: fine)');
+		const updateHoverPointer = () => {
+			hoverPointer = hoverQuery.matches;
+			if (hoverPointer) tappedAgentKey = null;
+		};
+		updateHoverPointer();
+		hoverQuery.addEventListener('change', updateHoverPointer);
 		desktopSidebarHidden = localStorage.getItem('yacwu-sidebar-hidden') === 'true';
 		try {
 			const savedFastSessions = JSON.parse(localStorage.getItem(FAST_SESSIONS_KEY) ?? '[]');
@@ -1899,11 +1937,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			es.close();
 			if (archiveNoticeTimer) clearTimeout(archiveNoticeTimer);
 			mobileQuery.removeEventListener('change', updateMobileViewport);
+			hoverQuery.removeEventListener('change', updateHoverPointer);
 		};
 	});
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
+<svelte:window onkeydown={onWindowKeydown} onclick={onWindowClick} />
 
 {#snippet fastMark()}
 	<span class="fast-mark" role="img" aria-label="Fast mode enabled" title="Fast mode enabled">
@@ -2518,7 +2557,15 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								</div>
 							{:else if item.type === 'agentMessage'}
 								{@const rawShown = Boolean(agentRawShown[agentRawKey(item)])}
-								<div class="item agent">
+								{@const time = agentTime(item)}
+								<!-- The tap handler is a touch-only hover surrogate; keyboard
+								     users reach the toggle directly via focus. -->
+								<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+								<div
+									class="item agent"
+									class:tapped={tappedAgentKey === agentRawKey(item)}
+									onclick={() => onAgentMessageTap(item)}
+								>
 									<div class="body media-body">
 									{#if rawShown}
 										<pre class="agent-raw">{(item as any).text ?? ''}</pre>
@@ -2535,22 +2582,27 @@ Do not modify files, source, git state, permissions, configuration, or any other
 										{/each}
 									{/if}
 									</div>
-									<button
-										type="button"
-										class="raw-toggle"
-										aria-pressed={rawShown}
-										aria-label={rawShown ? 'Show rendered Markdown' : 'Show raw Markdown'}
-										title={rawShown ? 'Show rendered Markdown' : 'Show raw Markdown'}
-										onclick={() => toggleAgentRaw(item)}
-									>
-										<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-											{#if rawShown}
-												<path d="M4 7h16M4 12h10M4 17h13" />
-											{:else}
-												<path d="m9 8-4 4 4 4M15 8l4 4-4 4" />
-											{/if}
-										</svg>
-									</button>
+									<div class="agent-meta">
+										{#if time}
+											<time class="agent-time" datetime={time.iso} title={time.full}>{time.label}</time>
+										{/if}
+										<button
+											type="button"
+											class="raw-toggle"
+											aria-pressed={rawShown}
+											aria-label={rawShown ? 'Show rendered Markdown' : 'Show raw Markdown'}
+											title={rawShown ? 'Show rendered Markdown' : 'Show raw Markdown'}
+											onclick={() => toggleAgentRaw(item)}
+										>
+											<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+												{#if rawShown}
+													<path d="M4 7h16M4 12h10M4 17h13" />
+												{:else}
+													<path d="m9 8-4 4 4 4M15 8l4 4-4 4" />
+												{/if}
+											</svg>
+										</button>
+									</div>
 								</div>
 							{:else if item.type === 'reasoning'}
 								{#if reasoningText(item)}
@@ -4018,14 +4070,29 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		white-space: pre-wrap;
 	}
 
-	/* Quiet per-message control; the transcript stays the artifact. */
+	/* Message footer: timestamp always visible at the start, quiet controls
+	   after it; the transcript stays the artifact. */
+	.agent-meta {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2xs);
+		justify-self: start;
+		min-height: var(--space-md);
+		margin-block-start: var(--space-3xs);
+	}
+
+	.agent-time {
+		color: var(--color-muted);
+		font-family: var(--font-body);
+		font-size: var(--text-xs);
+		font-variant-numeric: tabular-nums;
+	}
+
 	.raw-toggle {
 		display: grid;
 		place-items: center;
-		justify-self: start;
 		width: var(--space-md);
 		height: var(--space-md);
-		margin-block-start: var(--space-3xs);
 		padding: 0;
 		border: 0;
 		border-radius: var(--radius-sm);
@@ -4326,6 +4393,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		border-radius: 0;
 		background: transparent;
 		color: var(--color-neutral);
+	}
+
+	/* Tool-call rows (web search, agent collaboration) sit inside the
+	   surrounding activity without a rule above them. */
+	.item.web-search,
+	.item.subagent,
+	.item.collab {
+		border-block-start: 0;
 	}
 
 	/* Gutter glyphs are a size down from their body text; share the first
@@ -5223,6 +5298,20 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 		.session {
 			min-height: var(--control-height-compact);
+		}
+	}
+
+	@media (hover: none), (pointer: coarse) {
+		.raw-toggle {
+			opacity: 0;
+			pointer-events: none;
+		}
+
+		.item.agent.tapped .raw-toggle,
+		.item.agent:focus-within .raw-toggle,
+		.raw-toggle[aria-pressed='true'] {
+			opacity: 1;
+			pointer-events: auto;
 		}
 	}
 
