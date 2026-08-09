@@ -3975,6 +3975,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		padding-block-end: var(--space-xs);
 	}
 
+	/* Agent messages already end with their compact meta row, so their
+	   wrapper needs less trailing space than other transcript rows. */
+	.virtual-row:has(> .item.agent) {
+		padding-block-end: var(--space-2xs);
+	}
+
 	.sys {
 		padding-block-end: var(--space-xs);
 		color: var(--color-muted);
@@ -4056,7 +4062,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.item.agent {
 		grid-template-columns: minmax(0, 1fr);
 		gap: 0;
-		padding: var(--space-3xs) var(--space-sm);
+		/* The meta row supplies the trailing whitespace; no extra padding. */
+		padding: var(--space-3xs) var(--space-sm) 0;
 		color: var(--color-ink);
 	}
 
