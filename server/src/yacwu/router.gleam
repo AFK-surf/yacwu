@@ -26,6 +26,7 @@ import simplifile
 import yacwu/auth
 import yacwu/codex.{type Codex}
 import yacwu/defaults
+import yacwu/files
 import yacwu/jsonx
 import yacwu/model_state.{type Store}
 import yacwu/profiles
@@ -129,6 +130,8 @@ fn dispatch(
     ["api", "threads", "loaded"], Get -> loaded_threads(ctx)
     ["api", "threads", id], Get -> read_thread(ctx, id)
     ["api", "threads", id, "open"], Post -> open_thread(ctx, req, id)
+    ["api", "threads", id, "files"], Get -> list_files(ctx, req, id)
+    ["api", "threads", id, "file"], Get -> read_file(ctx, req, id)
     ["api", "threads", id, "message"], Post -> message(ctx, req, id)
     ["api", "threads", id, "interrupt"], Post -> interrupt(ctx, req, id)
     ["api", "threads", id, "goal"], Get -> get_goal(ctx, id)
@@ -354,6 +357,103 @@ fn image(
             404,
             json.object([#("message", json.string("image not found"))]),
           )
+      }
+  }
+}
+
+// -- /api/threads/[id]/files and /api/threads/[id]/file -----------------------
+
+/// The session's working directory, which roots all file browsing.
+fn thread_root(ctx: Context, thread_id: String) -> Result(String, String) {
+  case
+    codex.request(
+      ctx.codex,
+      "thread/read",
+      json.object([
+        #("threadId", json.string(thread_id)),
+        #("includeTurns", json.bool(False)),
+      ]),
+    )
+  {
+    Ok(read) ->
+      case jsonx.field_string(read, ["thread", "cwd"]) {
+        Ok(cwd) if cwd != "" -> Ok(cwd)
+        _ -> Error("session working directory unavailable")
+      }
+    Error(message) -> Error(message)
+  }
+}
+
+/// The sanitized `path` query parameter ("" is the session root).
+fn query_rel_path(req: Request(Connection)) -> Result(String, Nil) {
+  request.get_query(req)
+  |> result.unwrap([])
+  |> list.key_find("path")
+  |> result.unwrap("")
+  |> files.sanitize
+}
+
+fn list_files(
+  ctx: Context,
+  req: Request(Connection),
+  thread_id: String,
+) -> Response(ResponseData) {
+  case query_rel_path(req) {
+    Error(_) -> json_response(400, error_body("invalid path"))
+    Ok(rel) ->
+      case thread_root(ctx, thread_id) {
+        Error(message) -> json_response(500, error_body(message))
+        Ok(root) ->
+          case files.list_directory(files.resolve(root, rel)) {
+            Error(message) -> json_response(404, error_body(message))
+            Ok(entries) ->
+              json_response(
+                200,
+                json.object([
+                  #("root", json.string(root)),
+                  #("path", json.string(rel)),
+                  #("entries", files.entries_to_json(entries)),
+                ]),
+              )
+          }
+      }
+  }
+}
+
+fn read_file(
+  ctx: Context,
+  req: Request(Connection),
+  thread_id: String,
+) -> Response(ResponseData) {
+  case query_rel_path(req) {
+    Error(_) -> json_response(400, error_body("invalid path"))
+    Ok("") -> json_response(400, error_body("file path is required"))
+    Ok(rel) ->
+      case thread_root(ctx, thread_id) {
+        Error(message) -> json_response(500, error_body(message))
+        Ok(root) -> {
+          let meta = fn(size: Int) {
+            [#("path", json.string(rel)), #("size", json.int(size))]
+          }
+          case files.read_file(files.resolve(root, rel)) {
+            files.Text(size, content) ->
+              json_response(
+                200,
+                json.object([#("content", json.string(content)), ..meta(size)]),
+              )
+            files.Binary(size) ->
+              json_response(
+                200,
+                json.object([#("binary", json.bool(True)), ..meta(size)]),
+              )
+            files.TooLarge(size) ->
+              json_response(
+                200,
+                json.object([#("tooLarge", json.bool(True)), ..meta(size)]),
+              )
+            files.Missing -> json_response(404, error_body("file not found"))
+          }
+        }
       }
   }
 }

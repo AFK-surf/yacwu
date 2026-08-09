@@ -15,6 +15,7 @@
 	} from '$lib/protocol';
 	import { parseSlash, SLASH_HELP, filterSlashCommands, type SlashCommandInfo } from '$lib/slash';
 	import { ComposerHistory } from '$lib/history';
+	import FileBrowser from '$lib/FileBrowser.svelte';
 	import { parseCodexMarkdown, type MarkdownBlock, type MarkdownInline } from '$lib/markdown';
 
 	let { children } = $props();
@@ -102,6 +103,11 @@
 	let unseenActivity = $state(false);
 	let archiveNotice = $state<ArchiveNotice | null>(null);
 	let sessionInfoDialog = $state<HTMLDialogElement | null>(null);
+	// Read-only file browser (FileBrowser.svelte), rooted at the session cwd.
+	let filesOpen = $state(false);
+	let filesReveal = $state<{ path: string; line: number | null; nonce: number } | null>(null);
+	let filesRefresh = $state(0);
+	let filesToggleEl = $state<HTMLButtonElement | null>(null);
 	let sidebarEl = $state<HTMLElement | null>(null);
 	let sidebarToggleEl = $state<HTMLButtonElement | null>(null);
 	let imageInputEl = $state<HTMLInputElement | null>(null);
@@ -110,6 +116,12 @@
 	let transcriptViewportHeight = $state(0);
 	let transcriptHeightVersion = $state(0);
 	let commandOutputExpanded = $state<Record<string, boolean>>({});
+	// Per-message toggle between rendered and raw Markdown for Codex replies.
+	let agentRawShown = $state<Record<string, boolean>>({});
+	// Touch devices have no hover: a tap on a message stands in for it,
+	// revealing that message's raw-Markdown toggle until a tap elsewhere.
+	let hoverPointer = $state(true);
+	let tappedAgentKey = $state<string | null>(null);
 	const rowHeights = new Map<string, number>();
 	// Per-session Up/Down message recall (codex TUI semantics; see $lib/history).
 	const composerHistories = new Map<string, ComposerHistory>();
@@ -208,7 +220,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		return threads[id];
 	}
 
-	function upsertItem(id: string, item: ThreadItem & { id: string }) {
+	function upsertItem(id: string, item: ThreadItem & { id: string }, stampTime = false) {
 		const t = ensureThread(id);
 		if (!t.byId[item.id]) t.order.push(item.id);
 		// Preserve any locally-accumulated streamed text across updates.
@@ -218,6 +230,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			if (next.text === '' && prev.text) next.text = prev.text;
 			if (next._reason === undefined && prev._reason) next._reason = prev._reason;
 			if (next._out === undefined && prev._out) next._out = prev._out;
+			if (next._at === undefined && prev._at) next._at = prev._at;
+		} else if (stampTime) {
+			// The protocol has no per-item timestamps; live items are stamped
+			// with arrival time. Restored history stays unstamped.
+			next._at = Date.now();
 		}
 		t.byId[item.id] = next;
 	}
@@ -273,6 +290,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		composerHistories.delete(id);
 		for (const key of Object.keys(commandOutputExpanded)) {
 			if (key.startsWith(`${id}:`)) delete commandOutputExpanded[key];
+		}
+		for (const key of Object.keys(agentRawShown)) {
+			if (key.startsWith(`${id}:`)) delete agentRawShown[key];
 		}
 		sessionStorage.removeItem(sideParentKey(id));
 	}
@@ -351,7 +371,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			}
 			case 'item/started':
 			case 'item/completed': {
-				if (tid && p.item?.id) upsertItem(tid, p.item);
+				if (tid && p.item?.id) upsertItem(tid, p.item, true);
+				// The file browser refreshes what it is showing when the agent
+				// touches files in the viewed session.
+				if (tid === activeId && p.item?.type === 'fileChange') filesRefresh += 1;
 				break;
 			}
 			case 'item/agentMessage/delta': {
@@ -1631,6 +1654,65 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		return '~';
 	}
 
+	function toggleFilesPanel() {
+		filesOpen = !filesOpen;
+		if (!filesOpen) filesToggleEl?.focus();
+	}
+
+	function closeFilesPanel() {
+		filesOpen = false;
+		filesToggleEl?.focus();
+	}
+
+	/** Open the file browser at a session-relative path, optionally on a line. */
+	function openFileInBrowser(rel: string, line: number | null = null) {
+		filesOpen = true;
+		filesReveal = { path: rel, line, nonce: ++localCounter };
+	}
+
+	/**
+	 * The session-relative path (and optional line) to open when a code span
+	 * in a Codex message looks like a workspace file, or null to leave it
+	 * plain. Requires a directory separator so identifiers like
+	 * `next.access_token` stay text; a `:line(:col)` suffix becomes the line
+	 * to reveal; absolute paths must sit inside the session's working
+	 * directory.
+	 */
+	function agentPathTarget(
+		text: string,
+		requireSeparator = true
+	): { path: string; line: number | null } | null {
+		if (!activeId) return null;
+		let candidate = text.trim();
+		try {
+			candidate = decodeURIComponent(candidate);
+		} catch {
+			/* not URL-encoded — use as written */
+		}
+		let line: number | null = null;
+		const withLine = candidate.match(/^(.*?):(\d+)(?::\d+)?$/);
+		if (withLine) {
+			candidate = withLine[1];
+			line = Number(withLine[2]) || null;
+		}
+		if (candidate.startsWith('/')) {
+			const cwd = (cwds[activeId] ?? activeSummary?.cwd)?.replace(/[\\/]+$/, '');
+			if (!cwd || !candidate.startsWith(`${cwd}/`)) return null;
+			candidate = candidate.slice(cwd.length + 1);
+		} else if (candidate.startsWith('./')) {
+			candidate = candidate.slice(2);
+		}
+		// Markdown link hrefs may name a single file; bare code spans need a
+		// separator so ordinary identifiers stay plain.
+		const pattern = requireSeparator
+			? /^[\w.@+-]+(?:\/[\w.@+-]+)+$/
+			: /^[\w.@+-]+(?:\/[\w.@+-]+)*$/;
+		if (!pattern.test(candidate)) return null;
+		// The character class admits dots, so rule out ".."-style segments.
+		if (candidate.split('/').some((segment) => /^\.+$/.test(segment))) return null;
+		return { path: candidate, line };
+	}
+
 	function displayFileChangePath(ch: any): string {
 		const path = fileChangePath(ch);
 		const cwd = activeId ? (cwds[activeId] ?? activeSummary?.cwd) : null;
@@ -1673,6 +1755,37 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	function commandOutputIsLong(output: string): boolean {
 		return commandOutputLineCount(output) > COMMAND_OUTPUT_COLLAPSE_LINES || output.length > COMMAND_OUTPUT_COLLAPSE_CHARS;
+	}
+
+	function agentRawKey(item: any): string {
+		return `${activeId ?? 'none'}:${String(item.id ?? '')}`;
+	}
+
+	function toggleAgentRaw(item: any) {
+		const key = agentRawKey(item);
+		agentRawShown[key] = !agentRawShown[key];
+	}
+
+	function agentTime(item: any): { label: string; iso: string; full: string } | null {
+		const at = (item as any)._at;
+		if (typeof at !== 'number') return null;
+		const date = new Date(at);
+		return {
+			label: date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+			iso: date.toISOString(),
+			full: date.toLocaleString()
+		};
+	}
+
+	function onAgentMessageTap(item: any) {
+		if (hoverPointer) return;
+		tappedAgentKey = agentRawKey(item);
+	}
+
+	function onWindowClick(e: MouseEvent) {
+		if (hoverPointer || tappedAgentKey === null) return;
+		const target = e.target as Element | null;
+		if (!target?.closest?.('.item.agent')) tappedAgentKey = null;
 	}
 
 	function commandOutputStateKey(item: any): string {
@@ -1814,6 +1927,13 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			mobileViewport = mobileQuery.matches;
 			if (!mobileViewport) mobileSidebarOpen = false;
 		};
+		const hoverQuery = window.matchMedia('(hover: hover) and (pointer: fine)');
+		const updateHoverPointer = () => {
+			hoverPointer = hoverQuery.matches;
+			if (hoverPointer) tappedAgentKey = null;
+		};
+		updateHoverPointer();
+		hoverQuery.addEventListener('change', updateHoverPointer);
 		desktopSidebarHidden = localStorage.getItem('yacwu-sidebar-hidden') === 'true';
 		try {
 			const savedFastSessions = JSON.parse(localStorage.getItem(FAST_SESSIONS_KEY) ?? '[]');
@@ -1848,11 +1968,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			es.close();
 			if (archiveNoticeTimer) clearTimeout(archiveNoticeTimer);
 			mobileQuery.removeEventListener('change', updateMobileViewport);
+			hoverQuery.removeEventListener('change', updateHoverPointer);
 		};
 	});
 </script>
 
-<svelte:window onkeydown={onWindowKeydown} />
+<svelte:window onkeydown={onWindowKeydown} onclick={onWindowClick} />
 
 {#snippet fastMark()}
 	<span class="fast-mark" role="img" aria-label="Fast mode enabled" title="Fast mode enabled">
@@ -1890,17 +2011,39 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		{:else if token.type === 'del'}
 			<del>{@render markdownInlines(token.children)}</del>
 		{:else if token.type === 'code'}
-			<code>{token.text}</code>
+			{@const pathTarget = agentPathTarget(token.text)}
+			{#if pathTarget !== null}
+				<button
+					type="button"
+					class="code-path"
+					title={pathTarget.line ? `Open in file browser at line ${pathTarget.line}` : 'Open in file browser'}
+					onclick={() => openFileInBrowser(pathTarget.path, pathTarget.line)}
+				><code>{token.text}</code></button>
+			{:else}
+				<code>{token.text}</code>
+			{/if}
 		{:else if token.type === 'break'}
 			<br />
 		{:else if token.type === 'link'}
 			{#if token.href}
-				<a
-					href={token.href}
-					title={token.title ?? undefined}
-					target={token.external ? '_blank' : undefined}
-					rel={token.external ? 'noreferrer noopener' : undefined}
-				>{@render markdownInlines(token.children)}</a>
+				{@const fileTarget = token.external ? null : agentPathTarget(token.href, false)}
+				{#if fileTarget !== null}
+					<button
+						type="button"
+						class="link-path"
+						title={fileTarget.line
+							? `Open ${fileTarget.path} at line ${fileTarget.line}`
+							: `Open ${fileTarget.path} in file browser`}
+						onclick={() => openFileInBrowser(fileTarget.path, fileTarget.line)}
+					>{@render markdownInlines(token.children)}</button>
+				{:else}
+					<a
+						href={token.href}
+						title={token.title ?? undefined}
+						target={token.external ? '_blank' : undefined}
+						rel={token.external ? 'noreferrer noopener' : undefined}
+					>{@render markdownInlines(token.children)}</a>
+				{/if}
 			{:else}
 				{@render markdownInlines(token.children)}
 			{/if}
@@ -2248,6 +2391,19 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				</div>
 				<div class="session-state">
 					<button
+						class="files-trigger"
+						type="button"
+						bind:this={filesToggleEl}
+						onclick={toggleFilesPanel}
+						aria-pressed={filesOpen}
+						aria-label={filesOpen ? 'Close file browser' : 'Browse session files'}
+						title={filesOpen ? 'Close file browser' : 'Browse session files'}
+					>
+						<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+							<path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z" />
+						</svg>
+					</button>
+					<button
 						class="session-info-trigger"
 						type="button"
 						onclick={openSessionInfo}
@@ -2275,6 +2431,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					{/if}
 				</div>
 			</header>
+
+			{#if filesOpen}
+				{#key activeId}
+					<FileBrowser
+						threadId={activeId}
+						cwd={cwds[activeId] ?? activeSummary?.cwd ?? ''}
+						reveal={filesReveal}
+						refreshNonce={filesRefresh}
+						onclose={closeFilesPanel}
+					/>
+				{/key}
+			{/if}
 
 			<dialog
 				class="session-info-dialog"
@@ -2425,11 +2593,23 @@ Do not modify files, source, git state, permissions, configuration, or any other
 									</div>
 								</div>
 							{:else if item.type === 'agentMessage'}
-								<div class="item agent">
+								{@const rawShown = Boolean(agentRawShown[agentRawKey(item)])}
+								{@const time = agentTime(item)}
+								<!-- The tap handler is a touch-only hover surrogate; keyboard
+								     users reach the toggle directly via focus. -->
+								<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+								<div
+									class="item agent"
+									class:tapped={tappedAgentKey === agentRawKey(item)}
+									onclick={() => onAgentMessageTap(item)}
+								>
 									<div class="body media-body">
-									{#each agentParts((item as any).text ?? '') as part}
-										{#if part.type === 'text'}
-											<div class="markdown-body">{@render markdownBlocks(parseCodexMarkdown(part.text))}</div>
+									{#if rawShown}
+										<pre class="agent-raw">{(item as any).text ?? ''}</pre>
+									{:else}
+										{#each agentParts((item as any).text ?? '') as part}
+											{#if part.type === 'text'}
+												<div class="markdown-body">{@render markdownBlocks(parseCodexMarkdown(part.text))}</div>
 											{:else}
 												<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
 													<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
@@ -2437,6 +2617,28 @@ Do not modify files, source, git state, permissions, configuration, or any other
 												</a>
 											{/if}
 										{/each}
+									{/if}
+									</div>
+									<div class="agent-meta">
+										{#if time}
+											<time class="agent-time" datetime={time.iso} title={time.full}>{time.label}</time>
+										{/if}
+										<button
+											type="button"
+											class="raw-toggle"
+											aria-pressed={rawShown}
+											aria-label={rawShown ? 'Show rendered Markdown' : 'Show raw Markdown'}
+											title={rawShown ? 'Show rendered Markdown' : 'Show raw Markdown'}
+											onclick={() => toggleAgentRaw(item)}
+										>
+											<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+												{#if rawShown}
+													<path d="M4 7h16M4 12h10M4 17h13" />
+												{:else}
+													<path d="m9 8-4 4 4 4M15 8l4 4-4 4" />
+												{/if}
+											</svg>
+										</button>
 									</div>
 								</div>
 							{:else if item.type === 'reasoning'}
@@ -2484,9 +2686,19 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								<div class="item file">
 									<div class="body">
 										{#each (item as any).changes ?? [] as ch}
+											{@const rel = displayFileChangePath(ch)}
 											<div class="fc">
 												<span class="kind {fileChangeClass(ch)}" aria-label={fileChangeKind(ch)} title={fileChangeKind(ch)}>{fileChangeSymbol(ch)}</span>
-												<span class="path">{displayFileChangePath(ch)}</span>
+												{#if !rel.startsWith('/') && !fileChangeKind(ch).toLowerCase().includes('delete')}
+													<button
+														type="button"
+														class="path path-link"
+														title="Open in file browser"
+														onclick={() => openFileInBrowser(rel)}
+													>{rel}</button>
+												{:else}
+													<span class="path">{rel}</span>
+												{/if}
 											</div>
 										{/each}
 									</div>
@@ -3445,6 +3657,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		justify-self: end;
 	}
 
+	.files-trigger,
 	.session-info-trigger,
 	.session-info-close {
 		display: grid;
@@ -3463,10 +3676,17 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			transform var(--dur-micro) var(--ease-out);
 	}
 
+	.files-trigger[aria-pressed='true'] {
+		border-color: var(--color-rule);
+		background: var(--color-paper-3);
+		color: var(--color-ink);
+	}
+
 	.session-info-trigger {
 		position: relative;
 	}
 
+	.files-trigger svg,
 	.session-info-trigger svg,
 	.session-info-close svg {
 		display: block;
@@ -3792,6 +4012,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		padding-block-end: var(--space-xs);
 	}
 
+	/* Agent messages already end with their compact meta row, so their
+	   wrapper needs less trailing space than other transcript rows. */
+	.virtual-row:has(> .item.agent) {
+		padding-block-end: var(--space-2xs);
+	}
+
 	.sys {
 		padding-block-end: var(--space-xs);
 		color: var(--color-muted);
@@ -3873,8 +4099,70 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.item.agent {
 		grid-template-columns: minmax(0, 1fr);
 		gap: 0;
-		padding: var(--space-3xs) var(--space-sm);
+		/* The meta row supplies the trailing whitespace; no extra padding. */
+		padding: var(--space-3xs) var(--space-sm) 0;
 		color: var(--color-ink);
+	}
+
+	.agent-raw {
+		margin: 0;
+		overflow-wrap: anywhere;
+		color: var(--color-ink-2);
+		font-family: var(--font-outlier);
+		font-size: var(--text-sm);
+		line-height: 1.55;
+		white-space: pre-wrap;
+	}
+
+	/* Message footer: timestamp always visible at the start, quiet controls
+	   after it; kept to a single compact line so message rhythm stays tight. */
+	.agent-meta {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2xs);
+		justify-self: start;
+		min-height: calc(var(--space-sm) + var(--space-3xs));
+	}
+
+	.agent-time {
+		color: var(--color-muted);
+		font-family: var(--font-body);
+		font-size: var(--text-xs);
+		font-variant-numeric: tabular-nums;
+		line-height: 1.2;
+	}
+
+	.raw-toggle {
+		display: grid;
+		place-items: center;
+		width: calc(var(--space-sm) + var(--space-3xs));
+		height: calc(var(--space-sm) + var(--space-3xs));
+		padding: 0;
+		border: 0;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--color-muted);
+		cursor: pointer;
+		transition:
+			background-color var(--dur-micro) var(--ease-out),
+			color var(--dur-micro) var(--ease-out),
+			opacity var(--dur-micro) var(--ease-out);
+	}
+
+	.raw-toggle svg {
+		display: block;
+		width: var(--space-xs);
+		height: var(--space-xs);
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 1.75;
+	}
+
+	.raw-toggle[aria-pressed='true'] {
+		background: var(--color-paper-3);
+		color: var(--color-neutral);
 	}
 
 	.item.agent .body {
@@ -3969,6 +4257,31 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		font-size: 0.78em;
 	}
 
+	/* Code spans that resolve to workspace files open the file browser. */
+	.markdown-body .code-path {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+		font: inherit;
+		text-align: start;
+	}
+
+	.markdown-body .code-path code {
+		text-decoration: underline;
+		text-decoration-color: var(--color-rule-2);
+		text-decoration-thickness: var(--rule-hair);
+		text-underline-offset: var(--space-3xs);
+		transition: color var(--dur-micro) var(--ease-out);
+	}
+
+	.markdown-body .code-path:hover code,
+	.markdown-body .code-path:focus-visible code {
+		color: var(--color-accent-active);
+		text-decoration-color: currentColor;
+	}
+
 	.markdown-code {
 		display: flex;
 		flex-direction: column;
@@ -4000,10 +4313,22 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		font-size: var(--text-sm);
 	}
 
-	.markdown-body a {
+	.markdown-body a,
+	.markdown-body .link-path {
 		color: var(--color-accent-active);
+		text-decoration: underline;
 		text-decoration-thickness: var(--rule-hair);
 		text-underline-offset: var(--space-3xs);
+	}
+
+	/* Markdown links that resolve to workspace files open the file browser. */
+	.markdown-body .link-path {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		cursor: pointer;
+		font: inherit;
+		text-align: start;
 	}
 
 	.markdown-image {
@@ -4108,7 +4433,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.item.generic {
 		padding: var(--space-2xs) var(--space-sm);
 		border: 0;
-		border-block-start: var(--rule-hair) solid var(--color-rule);
 		border-radius: 0;
 		background: transparent;
 		color: var(--color-neutral);
@@ -4192,7 +4516,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		flex-direction: column;
 		gap: 0;
 		overflow: visible;
-		border-block-start: var(--rule-hair) solid var(--color-rule);
 		border-radius: 0;
 		background: transparent;
 		color: var(--color-neutral);
@@ -4361,6 +4684,28 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	.fc .path {
 		min-width: 0;
+	}
+
+	.fc .path-link {
+		padding: 0;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		cursor: pointer;
+		font: inherit;
+		text-align: start;
+		text-decoration: underline;
+		text-decoration-color: transparent;
+		text-decoration-thickness: var(--rule-hair);
+		text-underline-offset: var(--space-3xs);
+		overflow-wrap: anywhere;
+		transition: color var(--dur-micro) var(--ease-out);
+	}
+
+	.fc .path-link:hover,
+	.fc .path-link:focus-visible {
+		color: var(--color-accent-active);
+		text-decoration-color: currentColor;
 	}
 
 	.step {
@@ -4745,6 +5090,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			pointer-events: auto;
 		}
 
+		.raw-toggle {
+			opacity: 0;
+			pointer-events: none;
+		}
+
+		.item.agent:hover .raw-toggle,
+		.item.agent:focus-within .raw-toggle,
+		.raw-toggle[aria-pressed='true'] {
+			opacity: 1;
+			pointer-events: auto;
+		}
+
 		.cwd-input:hover,
 		.profile-input:hover {
 			background: var(--color-paper-2);
@@ -4753,6 +5110,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.mini.ghost:hover,
 		.attach:hover,
 		.stop:hover,
+		.raw-toggle:hover,
+		.files-trigger:hover,
 		.session-info-trigger:hover,
 		.session-info-close:hover,
 		.delete-session:hover,
@@ -4789,6 +5148,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.new:active,
 	.mini:active,
 	.stop:active,
+	.files-trigger:active,
 	.session-info-trigger:active,
 	.session-info-close:active,
 	.attach:active,
@@ -4942,6 +5302,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.new,
 		.mini,
 		.stop,
+		.files-trigger,
 		.session-info-trigger,
 		.session-info-close,
 		.attach,
@@ -4957,6 +5318,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.send,
 		.new,
 		.stop,
+		.files-trigger,
 		.session-info-trigger,
 		.session-info-close {
 			width: var(--control-height-compact);
@@ -4973,6 +5335,20 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		}
 	}
 
+	@media (hover: none), (pointer: coarse) {
+		.raw-toggle {
+			opacity: 0;
+			pointer-events: none;
+		}
+
+		.item.agent.tapped .raw-toggle,
+		.item.agent:focus-within .raw-toggle,
+		.raw-toggle[aria-pressed='true'] {
+			opacity: 1;
+			pointer-events: auto;
+		}
+	}
+
 	@media (pointer: coarse) {
 		.cmd-toggle {
 			min-height: var(--control-height);
@@ -4983,6 +5359,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.new,
 		.mini,
 		.stop,
+		.files-trigger,
 		.session-info-trigger,
 		.session-info-close,
 		.attach,
@@ -4993,11 +5370,13 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.new-activity,
 		.archive-toast button,
 		.slash-option,
+		.raw-toggle,
 		.session {
 			min-height: var(--control-height);
 		}
 
-		.delete-session {
+		.delete-session,
+		.raw-toggle {
 			width: var(--control-height);
 		}
 	}
