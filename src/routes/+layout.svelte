@@ -168,6 +168,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		if (!thr?.id) return;
 		if (thr.cwd) cwds[thr.id] = thr.cwd;
 		const now = Date.now();
+		// Preserve relationship metadata when a payload omits it (codex reports
+		// forkedFromId only in the thread/fork response, not on later reads).
+		const existing = sessions.find((s) => s.id === thr.id);
 		const summary: ThreadSummary = {
 			id: thr.id,
 			preview: thr.preview ?? '',
@@ -175,8 +178,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			createdAt: thr.createdAt ?? now,
 			updatedAt: thr.updatedAt ?? thr.createdAt ?? now,
 			cwd: thr.cwd,
-			forkedFromId: thr.forkedFromId ?? null,
-			ephemeral: thr.ephemeral ?? false
+			forkedFromId: thr.forkedFromId ?? existing?.forkedFromId ?? null,
+			ephemeral: thr.ephemeral ?? existing?.ephemeral ?? false
 		};
 		sessions = [summary, ...sessions.filter((s) => s.id !== thr.id)];
 	}
@@ -185,6 +188,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		sessions = sessions.filter((s) => s.id !== id);
 		delete threads[id];
 		delete cwds[id];
+		sessionStorage.removeItem(sideParentKey(id));
 	}
 
 	/** Append a client-side note (slash-command echo / help / errors). */
@@ -393,7 +397,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		try {
 			const res = await fetch('/api/threads');
 			const data = await res.json();
-			sessions = data.data ?? [];
+			const fetched: ThreadSummary[] = data.data ?? [];
+			// Merge instead of replacing: sessions created or forked after this
+			// fetch started (and not yet visible to thread/list) must survive.
+			const extras = sessions.filter((s) => !fetched.some((f) => f.id === s.id));
+			sessions = [...extras, ...fetched];
 			defaultCwd = data.defaultCwd ?? '';
 			await recoverSideChats();
 		} finally {
@@ -403,6 +411,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	// Ephemeral side chats are never persisted, so thread/list omits them.
 	// Re-attach any still loaded in codex memory to their parent sessions.
+	// Codex only reports forkedFromId in the thread/fork response, so the
+	// parent link is bridged through sessionStorage (same lifetime as the
+	// ephemeral thread: this browser session).
 	async function recoverSideChats() {
 		try {
 			const res = await fetch('/api/threads/loaded');
@@ -414,7 +425,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					const res = await fetch(`/api/threads/${id}`);
 					const data = await res.json();
 					const thr = data.thread;
-					if (thr?.ephemeral && thr?.forkedFromId) upsertSession(thr);
+					if (thr?.ephemeral) {
+						const parentId = sessionStorage.getItem(sideParentKey(thr.id));
+						upsertSession({ ...thr, forkedFromId: thr.forkedFromId ?? parentId ?? null });
+					}
 				} catch {
 					/* unreadable thread — skip */
 				}
@@ -889,6 +903,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					break;
 				}
 				const sideId: string = data.thread.id;
+				sessionStorage.setItem(sideParentKey(sideId), id);
 				upsertSession({ ...data.thread, forkedFromId: id, ephemeral: true });
 				ensureThread(sideId);
 				addLocalNote(id, `side conversation started: ${sideId.slice(0, 8)}`);
@@ -1048,7 +1063,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	function isSideChat(s: ThreadSummary | null | undefined): boolean {
-		return Boolean(s?.ephemeral && s?.forkedFromId);
+		return Boolean(s?.ephemeral);
+	}
+
+	function sideParentKey(sideId: string): string {
+		return `yacwu:side:${sideId}`;
 	}
 
 	function sideChatsOf(parentId: string): ThreadSummary[] {

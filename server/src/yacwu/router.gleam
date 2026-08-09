@@ -741,7 +741,14 @@ fn open_thread(
       let resume =
         codex.request(ctx.codex, "thread/resume", json.object(resume_params))
       case resume {
-        Error(message) -> json_response(500, error_body(message))
+        Error(message) ->
+          case read {
+            // Ephemeral side chats have no rollout to resume, but they are
+            // already loaded and thread/read rebuilds their turns from the
+            // live history — serve that instead of failing the open.
+            Ok(read) -> json_response(200, jsonx.to_json(read))
+            Error(_) -> json_response(500, error_body(message))
+          }
         Ok(_) ->
           case read {
             Ok(read) -> json_response(200, jsonx.to_json(read))
