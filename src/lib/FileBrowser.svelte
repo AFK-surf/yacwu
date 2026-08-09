@@ -35,7 +35,7 @@
 	}: {
 		threadId: string;
 		cwd: string;
-		reveal?: { path: string; nonce: number } | null;
+		reveal?: { path: string; line?: number | null; nonce: number } | null;
 		refreshNonce?: number;
 		onclose: () => void;
 	} = $props();
@@ -55,6 +55,9 @@
 	let monacoRef: Monaco = null;
 	let editor: any = null;
 	let model: any = null;
+	let lineDecorations: any = null;
+	// The line to reveal once the currently loading file reaches the viewer.
+	let targetLine: number | null = null;
 	let fileRequest = 0;
 	let lastRevealNonce = 0;
 	let lastRefreshNonce = 0;
@@ -96,8 +99,9 @@
 		if (expanded[path]) void loadDir(path);
 	}
 
-	async function selectFile(path: string) {
+	async function selectFile(path: string, line: number | null = null) {
 		selectedPath = path;
+		targetLine = line;
 		const request = ++fileRequest;
 		if (IMAGE_RE.test(path)) {
 			file = { status: 'ready', path, kind: 'image', size: 0, content: '' };
@@ -138,7 +142,7 @@
 	}
 
 	// Expand every ancestor of a transcript file-change path, then open it.
-	async function revealPath(path: string) {
+	async function revealPath(path: string, line: number | null = null) {
 		const parts = path.split('/').filter(Boolean);
 		let dir = '';
 		for (const part of parts.slice(0, -1)) {
@@ -146,7 +150,7 @@
 			expanded[dir] = true;
 			await loadDir(dir);
 		}
-		await selectFile(parts.join('/'));
+		await selectFile(parts.join('/'), line);
 	}
 
 	// Session root loads on mount; reveal/refresh props arrive as nonces so
@@ -163,7 +167,7 @@
 		const request = reveal;
 		if (!request || request.nonce === lastRevealNonce) return;
 		lastRevealNonce = request.nonce;
-		untrack(() => void revealPath(request.path));
+		untrack(() => void revealPath(request.path, request.line ?? null));
 	});
 
 	$effect(() => {
@@ -227,6 +231,21 @@
 		if (model.getValue() !== content) model.setValue(content);
 		editor.setModel(model);
 		if (previous && previous !== model) previous.dispose();
+
+		// Jump to a requested line (path:123 links), marking it quietly.
+		lineDecorations?.clear();
+		if (targetLine !== null) {
+			const line = Math.max(1, Math.min(targetLine, model.getLineCount()));
+			targetLine = null;
+			editor.revealLineInCenter(line);
+			editor.setPosition({ lineNumber: line, column: 1 });
+			lineDecorations = editor.createDecorationsCollection([
+				{
+					range: new monacoRef.Range(line, 1, line, 1),
+					options: { isWholeLine: true, className: 'fb-target-line' }
+				}
+			]);
+		}
 	}
 
 	onDestroy(() => {
@@ -627,6 +646,11 @@
 
 	.fb-editor.hidden {
 		visibility: hidden;
+	}
+
+	/* Monaco renders decorations outside Svelte's scoping. */
+	.fb-editor :global(.fb-target-line) {
+		background: var(--color-accent-soft);
 	}
 
 	.fb-plain {

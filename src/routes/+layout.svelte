@@ -105,7 +105,7 @@
 	let sessionInfoDialog = $state<HTMLDialogElement | null>(null);
 	// Read-only file browser (FileBrowser.svelte), rooted at the session cwd.
 	let filesOpen = $state(false);
-	let filesReveal = $state<{ path: string; nonce: number } | null>(null);
+	let filesReveal = $state<{ path: string; line: number | null; nonce: number } | null>(null);
 	let filesRefresh = $state(0);
 	let filesToggleEl = $state<HTMLButtonElement | null>(null);
 	let sidebarEl = $state<HTMLElement | null>(null);
@@ -116,6 +116,8 @@
 	let transcriptViewportHeight = $state(0);
 	let transcriptHeightVersion = $state(0);
 	let commandOutputExpanded = $state<Record<string, boolean>>({});
+	// Per-message toggle between rendered and raw Markdown for Codex replies.
+	let agentRawShown = $state<Record<string, boolean>>({});
 	const rowHeights = new Map<string, number>();
 	// Per-session Up/Down message recall (codex TUI semantics; see $lib/history).
 	const composerHistories = new Map<string, ComposerHistory>();
@@ -269,6 +271,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		composerHistories.delete(id);
 		for (const key of Object.keys(commandOutputExpanded)) {
 			if (key.startsWith(`${id}:`)) delete commandOutputExpanded[key];
+		}
+		for (const key of Object.keys(agentRawShown)) {
+			if (key.startsWith(`${id}:`)) delete agentRawShown[key];
 		}
 		sessionStorage.removeItem(sideParentKey(id));
 	}
@@ -1619,24 +1624,29 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		filesToggleEl?.focus();
 	}
 
-	/** Open the file browser at a transcript file-change path (session-relative). */
-	function openFileInBrowser(rel: string) {
+	/** Open the file browser at a session-relative path, optionally on a line. */
+	function openFileInBrowser(rel: string, line: number | null = null) {
 		filesOpen = true;
-		filesReveal = { path: rel, nonce: ++localCounter };
+		filesReveal = { path: rel, line, nonce: ++localCounter };
 	}
 
 	/**
-	 * The session-relative path to open when a code span in a Codex message
-	 * looks like a workspace file, or null to leave it plain. Requires a
-	 * directory separator so identifiers like `next.access_token` stay text;
-	 * a trailing :line(:col) suffix is stripped; absolute paths must sit
-	 * inside the session's working directory.
+	 * The session-relative path (and optional line) to open when a code span
+	 * in a Codex message looks like a workspace file, or null to leave it
+	 * plain. Requires a directory separator so identifiers like
+	 * `next.access_token` stay text; a `:line(:col)` suffix becomes the line
+	 * to reveal; absolute paths must sit inside the session's working
+	 * directory.
 	 */
-	function agentPathTarget(text: string): string | null {
+	function agentPathTarget(text: string): { path: string; line: number | null } | null {
 		if (!activeId) return null;
 		let candidate = text.trim();
-		const withLine = candidate.match(/^(.*?):\d+(?::\d+)?$/);
-		if (withLine) candidate = withLine[1];
+		let line: number | null = null;
+		const withLine = candidate.match(/^(.*?):(\d+)(?::\d+)?$/);
+		if (withLine) {
+			candidate = withLine[1];
+			line = Number(withLine[2]) || null;
+		}
 		if (candidate.startsWith('/')) {
 			const cwd = (cwds[activeId] ?? activeSummary?.cwd)?.replace(/[\\/]+$/, '');
 			if (!cwd || !candidate.startsWith(`${cwd}/`)) return null;
@@ -1644,7 +1654,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		} else if (candidate.startsWith('./')) {
 			candidate = candidate.slice(2);
 		}
-		return /^[\w.@+-]+(?:\/[\w.@+-]+)+$/.test(candidate) ? candidate : null;
+		if (!/^[\w.@+-]+(?:\/[\w.@+-]+)+$/.test(candidate)) return null;
+		return { path: candidate, line };
 	}
 
 	function displayFileChangePath(ch: any): string {
@@ -1689,6 +1700,15 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	function commandOutputIsLong(output: string): boolean {
 		return commandOutputLineCount(output) > COMMAND_OUTPUT_COLLAPSE_LINES || output.length > COMMAND_OUTPUT_COLLAPSE_CHARS;
+	}
+
+	function agentRawKey(item: any): string {
+		return `${activeId ?? 'none'}:${String(item.id ?? '')}`;
+	}
+
+	function toggleAgentRaw(item: any) {
+		const key = agentRawKey(item);
+		agentRawShown[key] = !agentRawShown[key];
 	}
 
 	function commandOutputStateKey(item: any): string {
@@ -1911,8 +1931,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				<button
 					type="button"
 					class="code-path"
-					title="Open in file browser"
-					onclick={() => openFileInBrowser(pathTarget)}
+					title={pathTarget.line ? `Open in file browser at line ${pathTarget.line}` : 'Open in file browser'}
+					onclick={() => openFileInBrowser(pathTarget.path, pathTarget.line)}
 				><code>{token.text}</code></button>
 			{:else}
 				<code>{token.text}</code>
@@ -2470,11 +2490,15 @@ Do not modify files, source, git state, permissions, configuration, or any other
 									</div>
 								</div>
 							{:else if item.type === 'agentMessage'}
+								{@const rawShown = Boolean(agentRawShown[agentRawKey(item)])}
 								<div class="item agent">
 									<div class="body media-body">
-									{#each agentParts((item as any).text ?? '') as part}
-										{#if part.type === 'text'}
-											<div class="markdown-body">{@render markdownBlocks(parseCodexMarkdown(part.text))}</div>
+									{#if rawShown}
+										<pre class="agent-raw">{(item as any).text ?? ''}</pre>
+									{:else}
+										{#each agentParts((item as any).text ?? '') as part}
+											{#if part.type === 'text'}
+												<div class="markdown-body">{@render markdownBlocks(parseCodexMarkdown(part.text))}</div>
 											{:else}
 												<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
 													<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
@@ -2482,7 +2506,15 @@ Do not modify files, source, git state, permissions, configuration, or any other
 												</a>
 											{/if}
 										{/each}
+									{/if}
 									</div>
+									<button
+										type="button"
+										class="raw-toggle"
+										aria-pressed={rawShown}
+										title={rawShown ? 'Show rendered Markdown' : 'Show raw Markdown'}
+										onclick={() => toggleAgentRaw(item)}
+									>{rawShown ? 'Rendered' : 'Raw'}</button>
 								</div>
 							{:else if item.type === 'reasoning'}
 								{#if reasoningText(item)}
@@ -3940,6 +3972,39 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		color: var(--color-ink);
 	}
 
+	.agent-raw {
+		margin: 0;
+		overflow-wrap: anywhere;
+		color: var(--color-ink-2);
+		font-family: var(--font-outlier);
+		font-size: var(--text-sm);
+		line-height: 1.55;
+		white-space: pre-wrap;
+	}
+
+	/* Quiet per-message control; the transcript stays the artifact. */
+	.raw-toggle {
+		justify-self: start;
+		margin-block-start: var(--space-2xs);
+		padding: var(--space-3xs) var(--space-2xs);
+		border: var(--rule-hair) solid var(--color-rule);
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--color-muted);
+		cursor: pointer;
+		font-size: var(--text-xs);
+		font-weight: 600;
+		transition:
+			background-color var(--dur-micro) var(--ease-out),
+			color var(--dur-micro) var(--ease-out);
+	}
+
+	.raw-toggle[aria-pressed='true'] {
+		border-color: var(--color-rule-2);
+		background: var(--color-paper-3);
+		color: var(--color-neutral);
+	}
+
 	.item.agent .body {
 		width: 100%;
 		max-width: none;
@@ -4863,6 +4928,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.mini.ghost:hover,
 		.attach:hover,
 		.stop:hover,
+		.raw-toggle:hover,
 		.files-trigger:hover,
 		.session-info-trigger:hover,
 		.session-info-close:hover,
@@ -5108,6 +5174,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.new-activity,
 		.archive-toast button,
 		.slash-option,
+		.raw-toggle,
 		.session {
 			min-height: var(--control-height);
 		}
