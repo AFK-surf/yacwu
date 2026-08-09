@@ -4071,14 +4071,13 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	/* Message footer: timestamp always visible at the start, quiet controls
-	   after it; the transcript stays the artifact. */
+	   after it; kept to a single compact line so message rhythm stays tight. */
 	.agent-meta {
 		display: flex;
 		align-items: center;
 		gap: var(--space-2xs);
 		justify-self: start;
-		min-height: var(--space-md);
-		margin-block-start: var(--space-3xs);
+		min-height: calc(var(--space-sm) + var(--space-3xs));
 	}
 
 	.agent-time {
@@ -4086,13 +4085,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		font-family: var(--font-body);
 		font-size: var(--text-xs);
 		font-variant-numeric: tabular-nums;
+		line-height: 1.2;
 	}
 
 	.raw-toggle {
 		display: grid;
 		place-items: center;
-		width: var(--space-md);
-		height: var(--space-md);
+		width: calc(var(--space-sm) + var(--space-3xs));
+		height: calc(var(--space-sm) + var(--space-3xs));
 		padding: 0;
 		border: 0;
 		border-radius: var(--radius-sm);
@@ -4107,8 +4107,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	.raw-toggle svg {
 		display: block;
-		width: var(--space-sm);
-		height: var(--space-sm);
+		width: var(--space-xs);
+		height: var(--space-xs);
 		fill: none;
 		stroke: currentColor;
 		stroke-linecap: round;
