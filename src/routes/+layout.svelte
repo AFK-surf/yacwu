@@ -6,7 +6,13 @@
 	import { onMount, tick, untrack } from 'svelte';
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
-	import type { JsonRpcNotification, ThreadItem, ThreadSummary, Turn } from '$lib/protocol';
+	import {
+		currentContextTokens,
+		type JsonRpcNotification,
+		type ThreadItem,
+		type ThreadSummary,
+		type Turn
+	} from '$lib/protocol';
 	import { parseSlash, SLASH_HELP } from '$lib/slash';
 	import { parseCodexMarkdown, type MarkdownBlock, type MarkdownInline } from '$lib/markdown';
 
@@ -81,6 +87,7 @@
 	let sessionsLoaded = $state(false);
 	let threads = $state<Record<string, ThreadState>>({});
 	let sessionConfigs = $state<Record<string, { model: string; effort: string; profile: string | null }>>({});
+	let fastSessions = $state<Record<string, boolean>>({});
 	let input = $state('');
 	let selectedImages = $state<SelectedImage[]>([]);
 	let sendingMessage = $state(false);
@@ -107,6 +114,7 @@
 	const VIRTUAL_OVERSCAN_PX = 700;
 	const COMMAND_OUTPUT_COLLAPSE_LINES = 10;
 	const COMMAND_OUTPUT_COLLAPSE_CHARS = 1200;
+	const FAST_SESSIONS_KEY = 'yacwu-fast-sessions';
 	let archiveNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
 	// The active session is whatever is in the URL (/s/<id>); / shows the welcome.
@@ -234,11 +242,25 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		sessions = sessions.filter((s) => s.id !== id);
 		delete threads[id];
 		delete sessionConfigs[id];
+		delete fastSessions[id];
+		persistFastSessions();
 		delete cwds[id];
 		for (const key of Object.keys(commandOutputExpanded)) {
 			if (key.startsWith(`${id}:`)) delete commandOutputExpanded[key];
 		}
 		sessionStorage.removeItem(sideParentKey(id));
+	}
+
+	function persistFastSessions() {
+		localStorage.setItem(
+			FAST_SESSIONS_KEY,
+			JSON.stringify(Object.keys(fastSessions).filter((id) => fastSessions[id]))
+		);
+	}
+
+	function setFastSession(id: string, enabled: boolean) {
+		fastSessions[id] = enabled;
+		persistFastSessions();
 	}
 
 	/** Append a client-side note (slash-command echo / help / errors). */
@@ -327,7 +349,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			case 'thread/tokenUsage/updated': {
 				if (tid) {
 					const t = ensureThread(tid);
-					t.tokens = p.tokenUsage?.total?.totalTokens ?? t.tokens;
+					const tokens = currentContextTokens(p.tokenUsage);
+					if (tokens !== null) t.tokens = tokens;
 					t.contextWindow = p.tokenUsage?.modelContextWindow ?? t.contextWindow;
 				}
 				break;
@@ -338,6 +361,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			}
 			case 'thread/goal/cleared': {
 				if (tid) ensureThread(tid).goal = null;
+				break;
+			}
+			case 'thread/settings/updated': {
+				if (tid && p.threadSettings) {
+					setFastSession(tid, p.threadSettings.serviceTier === 'priority');
+				}
 				break;
 			}
 			case 'turn/error':
@@ -592,6 +621,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		if (id) {
 			ensureThread(id);
 			upsertSession(data.thread);
+			setFastSession(id, data.serviceTier === 'priority');
 			goto(`/s/${id}`);
 			mobileSidebarOpen = false;
 		}
@@ -653,6 +683,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			conflict = null;
 			const thr = data.thread;
 			if (thr?.cwd) cwds[id] = thr.cwd;
+			if ('serviceTier' in data) setFastSession(id, data.serviceTier === 'priority');
 			// Only sync the transcript when the server actually returned history.
 			// A failed open (e.g. a brand-new thread with no rollout yet) must not
 			// wipe locally rendered items — the response can arrive late, after
@@ -792,6 +823,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		const cwd = cwds[id] ?? sess?.cwd;
 		if (cwd) lines.push(`  cwd       ${cwd}`);
 		lines.push(`  state     ${t?.status ?? 'idle'}`);
+		lines.push(`  fast      ${fastSessions[id] ? 'on' : 'off'}`);
 		try {
 			const res = await fetch(`/api/threads/${id}/model`);
 			const settings = (await res.json()) as Partial<ModelState> & { error?: string };
@@ -809,7 +841,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		} catch {
 			/* no profile line */
 		}
-		if (t?.tokens != null && t.contextWindow != null) {
+		if (t?.tokens != null && t.contextWindow != null && t.contextWindow > 0) {
 			const percent = ((t.tokens / t.contextWindow) * 100).toFixed(1);
 			lines.push(
 				`  context   ${t.tokens.toLocaleString()} / ${t.contextWindow.toLocaleString()} tokens (${percent}%)`
@@ -868,6 +900,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			case 'status':
 				addLocalNote(id, await buildStatus(id));
 				break;
+
+			case 'fast': {
+				const enabled = !fastSessions[id];
+				const { ok, data } = await postCmd(id, 'fast', { enabled });
+				if (ok) setFastSession(id, Boolean(data.enabled));
+				addLocalNote(
+					id,
+					ok ? `Fast mode ${data.enabled ? 'enabled' : 'disabled'}` : data.error ?? 'failed to change Fast mode',
+					ok ? 'info' : 'err'
+				);
+				break;
+			}
 
 			case 'model-show': {
 				try {
@@ -1424,6 +1468,60 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		return `${lines} ${lines === 1 ? 'line' : 'lines'}`;
 	}
 
+	function safeWebUrl(value: unknown): string | null {
+		if (typeof value !== 'string' || !value) return null;
+		try {
+			const url = new URL(value);
+			return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
+		} catch {
+			return null;
+		}
+	}
+
+	function webSearchPresentation(item: any): {
+		label: string;
+		detail: string;
+		href: string | null;
+		resultCount: number;
+	} {
+		const action = item.action;
+		const resultCount = Array.isArray(item.results) ? item.results.length : 0;
+		if (!action) {
+			return {
+				label: 'Searching the web',
+				detail: item.query || '',
+				href: null,
+				resultCount
+			};
+		}
+		switch (action.type) {
+			case 'search': {
+				const detail =
+					action.query ||
+					(Array.isArray(action.queries) ? action.queries.filter(Boolean).join(', ') : '') ||
+					item.query ||
+					'';
+				return { label: 'Searched the web for', detail, href: null, resultCount };
+			}
+			case 'openPage': {
+				const detail = action.url || item.query || '';
+				return { label: 'Opened', detail, href: safeWebUrl(action.url), resultCount };
+			}
+			case 'findInPage': {
+				const pattern = action.pattern ? `“${action.pattern}”` : '';
+				const url = action.url || '';
+				return {
+					label: 'Searched in page for',
+					detail: [pattern, url].filter(Boolean).join(' · ') || item.query || '',
+					href: null,
+					resultCount
+				};
+			}
+			default:
+				return { label: 'Used web search', detail: item.query || '', href: null, resultCount };
+		}
+	}
+
 	function subAgentActivityParts(item: any): { prefix: string; path: string } {
 		const path = item.agentPath ?? item.agentThreadId ?? 'agent';
 		switch (item.kind) {
@@ -1485,6 +1583,16 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			if (!mobileViewport) mobileSidebarOpen = false;
 		};
 		desktopSidebarHidden = localStorage.getItem('yacwu-sidebar-hidden') === 'true';
+		try {
+			const savedFastSessions = JSON.parse(localStorage.getItem(FAST_SESSIONS_KEY) ?? '[]');
+			if (Array.isArray(savedFastSessions)) {
+				fastSessions = Object.fromEntries(
+					savedFastSessions.filter((id): id is string => typeof id === 'string').map((id) => [id, true])
+				);
+			}
+		} catch {
+			fastSessions = {};
+		}
 		updateMobileViewport();
 		mobileQuery.addEventListener('change', updateMobileViewport);
 
@@ -1521,6 +1629,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		alt="Codex"
 		title="Codex"
 	/>
+{/snippet}
+
+{#snippet fastMark()}
+	<span class="fast-mark" role="img" aria-label="Fast mode enabled" title="Fast mode enabled">
+		<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+			<path d="M9.1 1.5 3.7 8.7h3.6L6.8 14.5l5.5-7.4H8.7z" />
+		</svg>
+	</span>
 {/snippet}
 
 {#snippet commandResult(item: any)}
@@ -1775,6 +1891,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							title={threads[s.id]?.error ? 'Error' : threads[s.id]?.status === 'running' ? 'Running' : 'Idle'}
 						></span>
 						<span class="label">{#if isSideChat(s)}⎇ {/if}{shortLabel(s)}</span>
+						{#if fastSessions[s.id]}{@render fastMark()}{/if}
 					</a>
 					<button
 						class="delete-session"
@@ -1806,6 +1923,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								title={threads[side.id]?.error ? 'Error' : threads[side.id]?.status === 'running' ? 'Running' : 'Idle'}
 							></span>
 							<span class="label">⎇ {shortLabel(side)}</span>
+							{#if fastSessions[side.id]}{@render fastMark()}{/if}
 						</a>
 						<button
 							class="delete-session"
@@ -1896,6 +2014,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					</div>
 				</div>
 				<div class="session-facts" aria-label="session configuration">
+					{#if fastSessions[activeId]}{@render fastMark()}{/if}
 					{#if activeConfig?.model}
 						<span class="fact model" title={`Model ${activeConfig.model}, ${activeConfig.effort} reasoning`}>
 							{activeConfig.model}<span class="fact-detail">/{activeConfig.effort}</span>
@@ -1974,6 +2093,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						<div>
 							<dt>Profile</dt>
 							<dd>{activeConfig?.profile ?? 'Base configuration'}</dd>
+						</div>
+						<div>
+							<dt>Fast mode</dt>
+							<dd>{fastSessions[activeId] ? 'Enabled' : 'Disabled'}</dd>
 						</div>
 						<div>
 							<dt>Tokens</dt>
@@ -2133,6 +2256,21 @@ Do not modify files, source, git state, permissions, configuration, or any other
 												<span class="path">{displayFileChangePath(ch)}</span>
 											</div>
 										{/each}
+									</div>
+								</div>
+							{:else if item.type === 'webSearch'}
+								{@const search = webSearchPresentation(item)}
+								<div class="item web-search">
+									<span class="gutter web-search-icon" aria-hidden="true">
+										<svg viewBox="0 0 16 16" focusable="false">
+											<circle cx="7" cy="7" r="4.25" />
+											<path d="m10.25 10.25 3 3" />
+										</svg>
+									</span>
+									<div class="body">
+										<span>{search.label}</span>{#if search.detail}
+											{' '}{#if search.href}<a href={search.href} target="_blank" rel="noreferrer noopener">{search.detail}</a>{:else}<span class="web-search-detail">{search.detail}</span>{/if}
+										{/if}{#if search.resultCount > 0}<span class="web-search-count"> · {search.resultCount} {search.resultCount === 1 ? 'result' : 'results'}</span>{/if}
 									</div>
 								</div>
 							{:else if item.type === 'plan'}
@@ -2735,7 +2873,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.session {
 		position: relative;
 		display: grid;
-		grid-template-columns: var(--space-xs) minmax(0, 1fr);
+		grid-template-columns: var(--space-xs) minmax(0, 1fr) auto;
 		gap: var(--space-2xs);
 		align-items: center;
 		width: 100%;
@@ -2779,6 +2917,26 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		white-space: nowrap;
 		font-size: var(--text-sm);
 		font-weight: 500;
+	}
+
+	.fast-mark {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--space-sm);
+		height: var(--space-sm);
+		color: var(--color-warning);
+		line-height: 1;
+	}
+
+	.fast-mark svg {
+		width: var(--space-sm);
+		height: var(--space-sm);
+		fill: currentColor;
+	}
+
+	.session .fast-mark {
+		grid-column: 3;
 	}
 
 	.session-row.side-row .session {
@@ -3651,6 +3809,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	.item.reason,
 	.item.file,
+	.item.web-search,
 	.item.plan,
 	.item.note,
 	.item.review,
@@ -3675,6 +3834,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	.item.file .gutter,
+	.item.web-search .gutter,
 	.item.review .gutter,
 	.item.subagent .gutter,
 	.item.collab .gutter {
@@ -3683,6 +3843,46 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	.item.file {
 		display: block;
+	}
+
+	.web-search-icon {
+		display: grid;
+		place-items: center;
+		width: var(--space-sm);
+		height: var(--space-sm);
+	}
+
+	.web-search-icon svg {
+		display: block;
+		width: 100%;
+		height: 100%;
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 1.5;
+	}
+
+	.item.web-search .body {
+		min-width: 0;
+		color: var(--color-muted);
+		font-size: var(--text-sm);
+		white-space: normal;
+	}
+
+	.web-search-detail,
+	.item.web-search a {
+		color: var(--color-ink-2);
+		overflow-wrap: anywhere;
+	}
+
+	.item.web-search a {
+		text-decoration-thickness: var(--rule-hair);
+		text-underline-offset: var(--space-3xs);
+	}
+
+	.web-search-count {
+		white-space: nowrap;
 	}
 
 	.item.cmd {

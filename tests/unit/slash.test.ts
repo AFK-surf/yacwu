@@ -2,6 +2,12 @@
 import { expect, test } from 'bun:test';
 import { parseSlash } from '../../src/lib/slash';
 
+test('/fast toggles Fast mode without arguments', () => {
+	expect(parseSlash('/fast')).toEqual({ kind: 'fast' });
+	expect(parseSlash('/FAST')).toEqual({ kind: 'fast' });
+	expect(parseSlash('/fast on')).toEqual({ kind: 'unknown', command: '/fast' });
+});
+
 test('/model shows model choices without arguments', () => {
 	expect(parseSlash('/model')).toEqual({ kind: 'model-show' });
 });

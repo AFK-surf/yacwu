@@ -64,6 +64,20 @@ export interface FileChangeItem {
 	changes: Array<{ path: string; kind: unknown; diff?: string }>;
 }
 
+export type WebSearchAction =
+	| { type: 'search'; query?: string | null; queries?: string[] | null }
+	| { type: 'openPage'; url?: string | null }
+	| { type: 'findInPage'; url?: string | null; pattern?: string | null }
+	| { type: 'other' };
+
+export interface WebSearchItem {
+	type: 'webSearch';
+	id: string;
+	query: string;
+	action?: WebSearchAction | null;
+	results?: unknown[] | null;
+}
+
 export interface PlanItem {
 	type: 'plan';
 	id: string;
@@ -116,6 +130,7 @@ export type ThreadItem =
 	| ReasoningItem
 	| CommandExecutionItem
 	| FileChangeItem
+	| WebSearchItem
 	| PlanItem
 	| SubAgentActivityItem
 	| CollabAgentToolCallItem
@@ -125,4 +140,13 @@ export interface Turn {
 	id: string;
 	status: string;
 	items?: ThreadItem[];
+}
+
+/** Codex reports cumulative thread usage in `total` and active-context usage in `last`. */
+export function currentContextTokens(tokenUsage: unknown): number | null {
+	if (!tokenUsage || typeof tokenUsage !== 'object') return null;
+	const last = (tokenUsage as { last?: unknown }).last;
+	if (!last || typeof last !== 'object') return null;
+	const tokens = (last as { totalTokens?: unknown }).totalTokens;
+	return typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 0 ? tokens : null;
 }

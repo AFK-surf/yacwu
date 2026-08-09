@@ -259,6 +259,10 @@ fn on_request(
               #("version", json.string(version)),
             ]),
           ),
+          #(
+            "capabilities",
+            json.object([#("experimentalApi", json.bool(True))]),
+          ),
         ]),
       )
       actor.continue(

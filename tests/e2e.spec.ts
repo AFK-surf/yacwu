@@ -307,6 +307,53 @@ test('command activity aligns status and collapses long output', async ({ page }
 	}
 });
 
+test('web search activity renders its action, query, and result count', async ({ page }) => {
+	await page.route('**/api/threads/*/open', async (route) => {
+		const id = new URL(route.request().url()).pathname.split('/')[3];
+		await route.fulfill({
+			json: {
+				thread: {
+					id,
+					turns: [
+						{
+							id: 'turn-web-search',
+							status: 'completed',
+							items: [
+								{
+									type: 'webSearch',
+									id: 'search-1',
+									query: 'Codex app-server protocol',
+									action: {
+										type: 'search',
+										query: 'Codex app-server protocol'
+									},
+									results: [
+										{
+											title: 'Protocol docs',
+											url: 'https://example.com/protocol'
+										},
+										{ title: 'Schema', url: 'https://example.com/schema' }
+									]
+								}
+							]
+						}
+					]
+				}
+			}
+		});
+	});
+
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
+
+	const search = page.locator('.item.web-search');
+	await expect(search).toContainText('Searched the web for Codex app-server protocol');
+	await expect(search).toContainText('2 results');
+	await expect(search.locator('.web-search-icon svg')).toBeVisible();
+});
+
 test('new session can target a specific working directory', async ({ page }) => {
 	await page.goto('/');
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
@@ -508,6 +555,38 @@ test('slash command: /status reports account, limits & session info', async ({ p
 	await expect(note).toContainText('account   dev@example.com · pro', { timeout: 15_000 });
 	await expect(note).toContainText('5h limit  42% used');
 	await expect(note).toContainText('7d limit  7% used');
+});
+
+test('slash command: /fast toggles Fast mode and marks the session', async ({ page }) => {
+	const requested: boolean[] = [];
+	await page.route('**/api/threads/*/fast', async (route) => {
+		const body = route.request().postDataJSON() as { enabled: boolean };
+		requested.push(body.enabled);
+		await route.fulfill({ json: { enabled: body.enabled } });
+	});
+
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
+
+	const textarea = page.locator('.composer textarea');
+	await textarea.fill('/fast');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note .body').last()).toHaveText('Fast mode enabled');
+	await expect(page.locator('.session.active .fast-mark')).toBeVisible();
+	await expect(page.locator('.session-facts .fast-mark')).toBeVisible();
+	await expect(page.locator('.session.active .fast-mark')).toHaveAttribute(
+		'aria-label',
+		'Fast mode enabled'
+	);
+
+	await textarea.fill('/fast');
+	await page.locator('button.send').click();
+	await expect(page.locator('.item.note .body').last()).toHaveText('Fast mode disabled');
+	await expect(page.locator('.session.active .fast-mark')).toHaveCount(0);
+	await expect(page.locator('.session-facts .fast-mark')).toHaveCount(0);
+	expect(requested).toEqual([true, false]);
 });
 
 test('slash command: /model lists and changes model settings', async ({ page }) => {

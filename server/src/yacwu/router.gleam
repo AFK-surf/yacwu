@@ -135,6 +135,7 @@ fn dispatch(
     ["api", "threads", id, "goal"], Post -> post_goal(ctx, req, id)
     ["api", "threads", id, "model"], Get -> get_model(ctx, id)
     ["api", "threads", id, "model"], Post -> post_model(ctx, req, id)
+    ["api", "threads", id, "fast"], Post -> post_fast(ctx, req, id)
     ["api", "threads", id, "compact"], Post ->
       simple_rpc(ctx, "thread/compact/start", id)
     ["api", "threads", id, "review"], Post -> review(ctx, req, id)
@@ -751,13 +752,22 @@ fn open_thread(
             Ok(read) -> json_response(200, jsonx.to_json(read))
             Error(_) -> json_response(500, error_body(message))
           }
-        Ok(_) ->
+        Ok(resume) -> {
+          let service_tier = case jsonx.field(resume, ["serviceTier"]) {
+            Ok(value) -> jsonx.to_json(value)
+            Error(_) -> json.null()
+          }
           case read {
-            Ok(read) -> json_response(200, jsonx.to_json(read))
+            Ok(read) ->
+              json_response(
+                200,
+                jsonx.object_with(read, [#("serviceTier", service_tier)]),
+              )
             Error(_) ->
               json_response(
                 200,
                 json.object([
+                  #("serviceTier", service_tier),
                   #(
                     "thread",
                     json.object([
@@ -768,6 +778,7 @@ fn open_thread(
                 ]),
               )
           }
+        }
       }
     }
   }
@@ -1158,6 +1169,40 @@ fn post_model(
         Ok(state) -> json_response(200, model_state.state_to_json(state))
         Error(message) -> json_response(400, error_body(message))
       }
+  }
+}
+
+/// Toggle Codex Fast mode for subsequent turns on a loaded thread. Codex
+/// exposes Fast mode as the `priority` service tier; an explicit null restores
+/// standard routing and prevents a model-catalog default from re-enabling it.
+fn post_fast(
+  ctx: Context,
+  req: Request(Connection),
+  thread_id: String,
+) -> Response(ResponseData) {
+  let body = read_json_body(req)
+  case jsonx.field_bool(body, ["enabled"]) {
+    Error(_) -> json_response(400, error_body("enabled must be a boolean"))
+    Ok(enabled) -> {
+      let service_tier = case enabled {
+        True -> json.string("priority")
+        False -> json.null()
+      }
+      case
+        codex.request(
+          ctx.codex,
+          "thread/settings/update",
+          json.object([
+            #("threadId", json.string(thread_id)),
+            #("serviceTier", service_tier),
+          ]),
+        )
+      {
+        Ok(_) ->
+          json_response(200, json.object([#("enabled", json.bool(enabled))]))
+        Error(message) -> json_response(400, error_body(message))
+      }
+    }
   }
 }
 

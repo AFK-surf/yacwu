@@ -1,6 +1,7 @@
 export type SlashCommand =
 	| { kind: 'help' }
 	| { kind: 'status' }
+	| { kind: 'fast' }
 	| { kind: 'model-show' }
 	| { kind: 'model-set'; model?: string; effort?: string }
 	| { kind: 'profile-show' }
@@ -20,6 +21,7 @@ export type SlashCommand =
 
 const COMMANDS: ReadonlyArray<readonly [string, string]> = [
 	['/status', 'show account, limits & session info'],
+	['/fast', 'toggle Codex Fast mode for this session'],
 	['/model', 'show the current model and available choices'],
 	['/model <model> [effort]', 'change model and reasoning effort'],
 	['/model --effort <effort>', 'change reasoning effort only'],
@@ -92,6 +94,8 @@ export function parseSlash(text: string): SlashCommand {
 			return arg ? { kind: 'unknown', command: cmd } : { kind: 'help' };
 		case '/status':
 			return arg ? { kind: 'unknown', command: cmd } : { kind: 'status' };
+		case '/fast':
+			return arg ? { kind: 'unknown', command: cmd } : { kind: 'fast' };
 		case '/model':
 			return parseModel(arg);
 		case '/profile': {
