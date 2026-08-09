@@ -64,7 +64,7 @@ A four-point named scale lives in `tokens.css`. Components use named tokens; raw
 - Persistent chrome should consume no more vertical space than its content requires. Goal state, session metadata, and composer help remain inline where the viewport permits.
 - Session creation in the rail uses an icon-only plus control with a persistent accessible name; it follows the same 24 px stroke language as composer actions.
 - Conversation state is icon-only: a quiet dot for idle and a pulsing activity glyph for running, always paired with an accessible name and tooltip.
-- Operational transcript events are flat activity-log rows separated by hairlines. Commands, file changes, plans, reasoning, reviews, and collaboration events never receive rounded card shells or tinted fills; dark surfaces are reserved for authored fenced code.
+- Operational transcript events are flat activity-log rows separated by spacing alone — no hairlines above rows. Commands, file changes, plans, reasoning, reviews, and collaboration events never receive rounded card shells or tinted fills; dark surfaces are reserved for authored fenced code.
 
 ## File browser
 

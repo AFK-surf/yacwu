@@ -4389,18 +4389,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.item.generic {
 		padding: var(--space-2xs) var(--space-sm);
 		border: 0;
-		border-block-start: var(--rule-hair) solid var(--color-rule);
 		border-radius: 0;
 		background: transparent;
 		color: var(--color-neutral);
-	}
-
-	/* Tool-call rows (web search, agent collaboration) sit inside the
-	   surrounding activity without a rule above them. */
-	.item.web-search,
-	.item.subagent,
-	.item.collab {
-		border-block-start: 0;
 	}
 
 	/* Gutter glyphs are a size down from their body text; share the first
@@ -4481,7 +4472,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		flex-direction: column;
 		gap: 0;
 		overflow: visible;
-		border-block-start: var(--rule-hair) solid var(--color-rule);
 		border-radius: 0;
 		background: transparent;
 		color: var(--color-neutral);
