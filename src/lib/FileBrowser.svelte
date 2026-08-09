@@ -197,6 +197,11 @@
 				monacoLoading = false;
 			}
 		}
+		// If the host node was ever replaced, the old editor is orphaned.
+		if (editor && editor.getContainerDomNode() !== el) {
+			editor.dispose();
+			editor = null;
+		}
 		if (!editor) {
 			editor = monacoRef.editor.create(el, {
 				readOnly: true,
@@ -354,18 +359,24 @@
 					<div class="fb-placeholder">
 						File is too large to display ({fmtBytes(file.size)}).
 					</div>
-				{:else}
-					{#if viewerError}
-						<div class="fb-placeholder err">{viewerError}</div>
-						<pre class="fb-plain">{file.content}</pre>
-					{:else}
-						{#if monacoLoading}
-							<div class="fb-placeholder">Loading code viewer…</div>
-						{/if}
-						<div class="fb-editor" bind:this={viewerEl} class:hidden={monacoLoading}></div>
-					{/if}
+				{:else if viewerError}
+					<div class="fb-placeholder err">{viewerError}</div>
+					<pre class="fb-plain">{file.content}</pre>
+				{:else if monacoLoading}
+					<div class="fb-placeholder">Loading code viewer…</div>
 				{/if}
 			{/if}
+			<!-- Persistent Monaco host: the editor instance is created once and
+			     must never be torn down by per-file state changes above. -->
+			<div
+				class="fb-editor"
+				bind:this={viewerEl}
+				class:hidden={!file ||
+					file.status !== 'ready' ||
+					file.kind !== 'text' ||
+					monacoLoading ||
+					viewerError !== null}
+			></div>
 		</section>
 	</div>
 </aside>
