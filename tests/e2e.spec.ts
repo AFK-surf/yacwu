@@ -408,6 +408,15 @@ test('Codex messages use the full row without a logo', async ({ page }) => {
 	});
 	expect(Math.abs(geometry.bodyLeft - geometry.contentLeft)).toBeLessThanOrEqual(1);
 	expect(Math.abs(geometry.bodyRight - geometry.contentRight)).toBeLessThanOrEqual(1);
+
+	await page.locator('.session-info-trigger').click();
+	const details = page.locator('.session-info-dialog');
+	await expect(details).toContainText('Last modified');
+	await expect(details.locator('time')).toHaveAttribute(
+		'datetime',
+		/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+	);
+	await expect(details.locator('time')).not.toHaveText('—');
 });
 
 test('side-chat delete unsubscribes without archiving and stays deleted after reload', async ({

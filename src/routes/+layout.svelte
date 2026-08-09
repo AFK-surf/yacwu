@@ -236,7 +236,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	function upsertSession(thr: any) {
 		if (!thr?.id) return;
 		if (thr.cwd) cwds[thr.id] = thr.cwd;
-		const now = Date.now();
+		const now = Math.floor(Date.now() / 1000);
 		// Preserve relationship metadata when a payload omits it (codex reports
 		// forkedFromId only in the thread/fork response, not on later reads).
 		const existing = sessions.find((s) => s.id === thr.id);
@@ -244,13 +244,23 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			id: thr.id,
 			preview: thr.preview ?? '',
 			name: thr.name ?? null,
-			createdAt: thr.createdAt ?? now,
-			updatedAt: thr.updatedAt ?? thr.createdAt ?? now,
+			createdAt: thr.createdAt ?? existing?.createdAt ?? now,
+			updatedAt: thr.updatedAt ?? thr.createdAt ?? existing?.updatedAt ?? now,
 			cwd: thr.cwd,
 			forkedFromId: thr.forkedFromId ?? existing?.forkedFromId ?? null,
 			ephemeral: thr.ephemeral ?? existing?.ephemeral ?? false
 		};
 		sessions = [summary, ...sessions.filter((s) => s.id !== thr.id)];
+	}
+
+	function touchSession(id: string, timestamp: unknown) {
+		const updatedAt =
+			typeof timestamp === 'number' && Number.isFinite(timestamp) && timestamp > 0
+				? Math.floor(timestamp)
+				: Math.floor(Date.now() / 1000);
+		sessions = sessions.map((session) =>
+			session.id === id ? { ...session, updatedAt } : session
+		);
 	}
 
 	function removeSession(id: string) {
@@ -323,6 +333,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					t.status = 'running';
 					t.turnId = p.turn?.id ?? null;
 					t.error = null;
+					touchSession(tid, p.turn?.startedAt);
 				}
 				break;
 			}
@@ -331,6 +342,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					const t = ensureThread(tid);
 					t.status = 'idle';
 					t.turnId = null;
+					touchSession(tid, p.turn?.completedAt);
 					if (p.turn?.status === 'failed' && p.turn?.error?.message) {
 						t.error = p.turn.error.message;
 					}
@@ -827,6 +839,25 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		if (h) return `${h}h ${m}m`;
 		if (m) return `${m}m`;
 		return `${Math.max(0, sec)}s`;
+	}
+
+	function sessionTimestampDate(timestamp: number | null | undefined): Date | null {
+		if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) return null;
+		const date = new Date(timestamp * 1000);
+		return Number.isNaN(date.getTime()) ? null : date;
+	}
+
+	function fmtSessionTimestamp(timestamp: number | null | undefined): string {
+		const date = sessionTimestampDate(timestamp);
+		if (!date) return '—';
+		return new Intl.DateTimeFormat(undefined, {
+			dateStyle: 'medium',
+			timeStyle: 'short'
+		}).format(date);
+	}
+
+	function sessionTimestampIso(timestamp: number | null | undefined): string | undefined {
+		return sessionTimestampDate(timestamp)?.toISOString();
 	}
 
 	function fmtReset(resetsAt: number): string {
@@ -2269,6 +2300,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						<div>
 							<dt>Directory</dt>
 							<dd>{cwds[activeId] ?? activeSummary?.cwd ?? '—'}</dd>
+						</div>
+						<div>
+							<dt>Last modified</dt>
+							<dd>
+								<time datetime={sessionTimestampIso(activeSummary?.updatedAt)}>{fmtSessionTimestamp(activeSummary?.updatedAt)}</time>
+							</dd>
 						</div>
 						<div>
 							<dt>Model</dt>
