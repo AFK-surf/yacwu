@@ -75,12 +75,19 @@ test('mobile drawer, compact header, composer growth, and archive undo remain us
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
 
 	const welcomeMenu = page.locator('.welcome-menu');
+	const sidebarScrim = page.locator('.sidebar-scrim');
 	await expect(welcomeMenu).toBeVisible();
+	await expect(sidebarScrim).toHaveCSS('visibility', 'hidden');
+	await expect(sidebarScrim).toHaveCSS('opacity', '0');
 	await expect(page.locator('#session-sidebar')).toHaveAttribute('inert', '');
 	await welcomeMenu.click();
+	await expect(sidebarScrim).toHaveCSS('visibility', 'visible');
+	await expect(sidebarScrim).toHaveCSS('opacity', '1');
 	await expect(page.locator('#session-sidebar')).not.toHaveAttribute('inert', '');
-	await expect(page.locator('.drawer-close')).toBeFocused();
+	await expect(page.locator('button.new')).toBeFocused();
 	await page.keyboard.press('Escape');
+	await expect(sidebarScrim).toHaveCSS('visibility', 'hidden');
+	await expect(sidebarScrim).toHaveCSS('opacity', '0');
 	await expect(welcomeMenu).toBeFocused();
 
 	await welcomeMenu.click();
@@ -148,7 +155,7 @@ test('mobile drawer, compact header, composer growth, and archive undo remain us
 	await expect(page.locator('.item.agent .body').last()).toContainText('OK', { timeout: 90_000 });
 
 	await page.locator('.header-menu').click();
-	await expect(page.locator('.drawer-close')).toBeFocused();
+	await expect(page.locator('.session.active')).toBeFocused();
 	const active = page.locator('.session.active');
 	const activeId = await active.getAttribute('data-id');
 	if (!activeId) throw new Error('new session did not expose its id');
@@ -352,6 +359,68 @@ test('web search activity renders its action, query, and result count', async ({
 	await expect(search).toContainText('Searched the web for Codex app-server protocol');
 	await expect(search).toContainText('2 results');
 	await expect(search.locator('.web-search-icon svg')).toBeVisible();
+});
+
+test('side-chat delete unsubscribes without archiving and stays deleted after reload', async ({
+	page
+}) => {
+	const sideId = '019fe706-e1c8-7f90-afd6-8de2f1898621';
+	let parentId = '';
+	let unsubscribeCalls = 0;
+	let archiveCalls = 0;
+
+	await page.route('**/api/threads/*/fork', async (route) => {
+		parentId = new URL(route.request().url()).pathname.split('/')[3];
+		await route.fulfill({
+			json: { thread: { id: sideId, forkedFromId: parentId, ephemeral: true } }
+		});
+	});
+	await page.route(`**/api/threads/${sideId}/open`, async (route) => {
+		await route.fulfill({
+			json: { thread: { id: sideId, ephemeral: true, turns: [] } }
+		});
+	});
+	await page.route(`**/api/threads/${sideId}/goal`, async (route) => {
+		await route.fulfill({ json: { goal: null } });
+	});
+	await page.route(`**/api/threads/${sideId}/unsubscribe`, async (route) => {
+		unsubscribeCalls += 1;
+		await route.fulfill({ json: { status: 'unsubscribed' } });
+	});
+	await page.route(`**/api/threads/${sideId}/archive`, async (route) => {
+		archiveCalls += 1;
+		await route.fulfill({ status: 400, json: { error: 'no rollout found' } });
+	});
+
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await page.locator('button.new').click();
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
+	await expect(page.locator('.composer')).toBeVisible();
+
+	await page.locator('.composer textarea').fill('/btw');
+	await page.locator('button.send').click();
+	const sideSession = page.locator(`.session[data-id="${sideId}"]`);
+	await expect(sideSession).toHaveClass(/active/);
+	const sideRow = page.locator('.session-row.side-row', { has: sideSession });
+	await sideRow.hover();
+	await sideRow.locator('.delete-session').click();
+
+	await expect(sideSession).toHaveCount(0);
+	await expect(page.locator('.archive-toast')).toContainText('Deleted');
+	await expect(page).toHaveURL(new RegExp(`/s/${parentId}$`));
+	expect(unsubscribeCalls).toBe(1);
+	expect(archiveCalls).toBe(0);
+
+	await page.route('**/api/threads/loaded', async (route) => {
+		await route.fulfill({ json: { data: [sideId] } });
+	});
+	await page.route(`**/api/threads/${sideId}`, async (route) => {
+		await route.fulfill({ json: { thread: { id: sideId, ephemeral: true } } });
+	});
+	await page.reload();
+	await expect(page.locator('nav.sessions[data-loaded="true"]')).toBeVisible();
+	await expect(page.locator(`.session[data-id="${sideId}"]`)).toHaveCount(0);
 });
 
 test('new session can target a specific working directory', async ({ page }) => {

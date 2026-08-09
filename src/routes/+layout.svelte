@@ -55,7 +55,7 @@
 	}
 
 	interface ArchiveNotice {
-		tone: 'undo' | 'error';
+		tone: 'undo' | 'info' | 'error';
 		message: string;
 		snapshot?: ArchivedSessionSnapshot;
 	}
@@ -308,6 +308,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				if (tid) removeSession(tid);
 				break;
 			}
+			case 'thread/closed': {
+				if (tid) removeSession(tid);
+				break;
+			}
 			case 'thread/unarchived': {
 				if (p.thread) upsertSession(p.thread);
 				else void loadSessions();
@@ -535,8 +539,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					const res = await fetch(`/api/threads/${id}`);
 					const data = await res.json();
 					const thr = data.thread;
-					if (thr?.ephemeral) {
-						const parentId = sessionStorage.getItem(sideParentKey(thr.id));
+					const parentId = thr?.id ? sessionStorage.getItem(sideParentKey(thr.id)) : null;
+					if (thr?.ephemeral && parentId) {
 						upsertSession({ ...thr, forkedFromId: thr.forkedFromId ?? parentId ?? null });
 					}
 				} catch {
@@ -1163,6 +1167,16 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			}
 
 			case 'archive': {
+				const session = sessions.find((session) => session.id === id);
+				if (session && isSideChat(session)) {
+					const result = await closeSideChat(session);
+					if (result.ok) {
+						showArchiveNotice({ tone: 'info', message: `Deleted ${shortLabel(session)}` });
+					} else {
+						addLocalNote(id, result.error ?? 'failed to delete side conversation', 'err');
+					}
+					break;
+				}
 				const { ok, data } = await postCmd(id, 'archive', {});
 				if (ok) {
 					removeSession(id);
@@ -1200,7 +1214,19 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	async function deleteSession(id: string) {
 		const session = sessions.find((s) => s.id === id);
 		if (!session) return;
-		const label = session ? shortLabel(session) : id.slice(0, 8);
+		const label = shortLabel(session);
+		if (isSideChat(session)) {
+			const result = await closeSideChat(session);
+			if (!result.ok) {
+				showArchiveNotice(
+					{ tone: 'error', message: result.error ?? 'Could not delete the side conversation.' },
+					6000
+				);
+				return;
+			}
+			showArchiveNotice({ tone: 'info', message: `Deleted ${label}` });
+			return;
+		}
 		const snapshot: ArchivedSessionSnapshot = {
 			id,
 			label,
@@ -1223,6 +1249,27 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		removeSession(id);
 		showArchiveNotice({ tone: 'undo', message: `Archived ${label}`, snapshot });
 		if (activeId === id) goto('/');
+	}
+
+	async function closeSideChat(
+		session: ThreadSummary
+	): Promise<{ ok: true } | { ok: false; error?: string }> {
+		const res = await fetch(`/api/threads/${session.id}/unsubscribe`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({})
+		});
+		if (!res.ok) {
+			const data = await res.json().catch(() => ({}));
+			return { ok: false, error: data.error };
+		}
+		const wasActive = activeId === session.id;
+		const parentId = session.forkedFromId;
+		removeSession(session.id);
+		if (wasActive) {
+			await goto(parentId && sessions.some((item) => item.id === parentId) ? `/s/${parentId}` : '/');
+		}
+		return { ok: true };
 	}
 
 	async function undoArchivedSession() {
@@ -2759,12 +2806,19 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		padding: 0;
 		border: 0;
 		background: var(--color-overlay);
+		visibility: hidden;
 		opacity: 0;
 		pointer-events: none;
 		transition: opacity var(--dur-short) var(--ease-in);
 	}
 
+	.sidebar-scrim:disabled {
+		opacity: 0;
+		cursor: default;
+	}
+
 	.app.sidebar-open .sidebar-scrim {
+		visibility: visible;
 		opacity: 1;
 		pointer-events: auto;
 		transition-timing-function: var(--ease-out);
