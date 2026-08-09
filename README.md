@@ -41,6 +41,7 @@ Type these in the composer (anything not starting with `/` is a normal model tur
 | `/shell <command>` | run a user-initiated shell command in the thread |
 | `/rollback [turns]` | roll back the last N turns (default 1) |
 | `/fork` | branch this thread into a new session |
+| `/btw [question]` | start an ephemeral side conversation (a throwaway fork that treats inherited history as read-only context) |
 | `/archive` | archive this session |
 | `/help` | list the commands |
 

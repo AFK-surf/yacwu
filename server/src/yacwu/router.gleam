@@ -138,7 +138,7 @@ fn dispatch(
     ["api", "threads", id, "review"], Post -> review(ctx, req, id)
     ["api", "threads", id, "shell"], Post -> shell(ctx, req, id)
     ["api", "threads", id, "rollback"], Post -> rollback(ctx, req, id)
-    ["api", "threads", id, "fork"], Post -> simple_rpc(ctx, "thread/fork", id)
+    ["api", "threads", id, "fork"], Post -> fork(ctx, req, id)
     ["api", "threads", id, "archive"], Post ->
       simple_rpc(ctx, "thread/archive", id)
     ["api", ..], _ -> json_response(404, error_body("not found"))
@@ -1186,6 +1186,37 @@ fn shell(
         ]),
       )
   }
+}
+
+/// Fork a thread into a new thread id. Optional body fields: `ephemeral`
+/// (non-persisted fork, used by /btw side conversations) and
+/// `developerInstructions` (extra instructions layered onto the fork).
+fn fork(
+  ctx: Context,
+  req: Request(Connection),
+  thread_id: String,
+) -> Response(ResponseData) {
+  let body = read_json_body(req)
+  let extra = case jsonx.field_bool(body, ["ephemeral"]) {
+    Ok(True) -> [#("ephemeral", json.bool(True))]
+    _ -> []
+  }
+  let extra = case jsonx.field_string(body, ["developerInstructions"]) {
+    Ok(instructions) ->
+      case string.trim(instructions) {
+        "" -> extra
+        instructions -> [
+          #("developerInstructions", json.string(instructions)),
+          ..extra
+        ]
+      }
+    Error(_) -> extra
+  }
+  rpc(
+    ctx,
+    "thread/fork",
+    json.object([#("threadId", json.string(thread_id)), ..extra]),
+  )
 }
 
 /// Roll back the last N turns and return the updated thread history.

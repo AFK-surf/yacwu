@@ -44,3 +44,15 @@ test('/profile clear (or default) reverts to the base config', () => {
 	expect(parseSlash('/profile clear')).toEqual({ kind: 'profile-clear' });
 	expect(parseSlash('/profile DEFAULT')).toEqual({ kind: 'profile-clear' });
 });
+
+test('/btw starts an empty side conversation without arguments', () => {
+	expect(parseSlash('/btw')).toEqual({ kind: 'btw' });
+});
+
+test('/btw carries the question as the first side-conversation message', () => {
+	expect(parseSlash('/btw what does parseSlash do?')).toEqual({
+		kind: 'btw',
+		message: 'what does parseSlash do?'
+	});
+	expect(parseSlash('/side quick question')).toEqual({ kind: 'btw', message: 'quick question' });
+});

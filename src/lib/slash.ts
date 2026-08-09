@@ -14,6 +14,7 @@ export type SlashCommand =
 	| { kind: 'shell'; command: string }
 	| { kind: 'rollback'; numTurns: number }
 	| { kind: 'fork' }
+	| { kind: 'btw'; message?: string }
 	| { kind: 'archive' }
 	| { kind: 'unknown'; command: string };
 
@@ -34,6 +35,7 @@ const COMMANDS: ReadonlyArray<readonly [string, string]> = [
 	['/shell <command>', 'run a shell command in the thread'],
 	['/rollback [turns]', 'roll back recent turns (default: 1)'],
 	['/fork', 'branch this thread into a new session'],
+	['/btw [question]', 'start an ephemeral side conversation'],
 	['/archive', 'archive this session'],
 	['/help', 'show this help']
 ];
@@ -115,6 +117,9 @@ export function parseSlash(text: string): SlashCommand {
 		}
 		case '/fork':
 			return arg ? { kind: 'unknown', command: cmd } : { kind: 'fork' };
+		case '/btw':
+		case '/side':
+			return arg ? { kind: 'btw', message: arg } : { kind: 'btw' };
 		case '/archive':
 			return arg ? { kind: 'unknown', command: cmd } : { kind: 'archive' };
 		default:
