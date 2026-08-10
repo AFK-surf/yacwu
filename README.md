@@ -129,7 +129,7 @@ Requires Docker (or podman with the docker CLI shim). The whole build runs in
 an Ubuntu 20.04 (glibc 2.31) container so the resulting AppImage works on
 distros at least that old: it pulls the prebuilt Erlang/OTP for that distro
 from hex.pm's build service (the same builds `erlef/setup-beam` uses), exports
-the backend with `gleam export erlang-shipment`, and bundles the pruned Erlang
+the backend with `gleam export erlang-shipment`, and bundles the Erlang
 runtime, the web UI build, and the non-glibc shared libraries the runtime
 needs (libssl, libtinfo, …). Both x86_64 and aarch64 Docker hosts are
 supported; the output uses the corresponding architecture in its filename.

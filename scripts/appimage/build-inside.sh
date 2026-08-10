@@ -43,16 +43,10 @@ mkdir -p "$APPDIR/usr/share/yacwu" "$APPDIR/usr/lib" "$APPDIR/usr/erlang"
 cp -r server/build/erlang-shipment "$APPDIR/usr/share/yacwu/shipment"
 cp -r build "$APPDIR/usr/share/yacwu/build"
 
-# Bundle the Erlang runtime (a release-style tree: bin/, erts-*/, lib/),
-# pruned to the applications the server loads.
+# Bundle the Erlang runtime (a release-style tree: bin/, erts-*/, lib/).
+# Keep all OTP applications so transitive runtime dependencies are available.
 cp -r /opt/erlang/. "$APPDIR/usr/erlang"
 ERL_ROOT="$APPDIR/usr/erlang"
-for app in "$ERL_ROOT"/lib/*; do
-  case "$(basename "$app" | cut -d- -f1)" in
-    kernel | stdlib | crypto | ssl | public_key | asn1 | sasl | runtime_tools) ;;
-    *) rm -rf "$app" ;;
-  esac
-done
 rm -rf "$ERL_ROOT"/lib/*/src "$ERL_ROOT"/lib/*/include "$ERL_ROOT"/lib/*/examples \
   "$ERL_ROOT"/misc "$ERL_ROOT"/man "$ERL_ROOT"/doc "$ERL_ROOT"/usr \
   "$ERL_ROOT"/Install \

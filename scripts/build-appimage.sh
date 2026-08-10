@@ -6,7 +6,7 @@
 # old. Requires Docker (or podman with the docker CLI shim).
 #
 # The AppImage bundles the compiled Gleam backend (gleam export
-# erlang-shipment), a pruned Erlang runtime, and the built web UI. It still
+# erlang-shipment), the Erlang runtime, and the built web UI. It still
 # needs the `codex` CLI on PATH at runtime.
 set -eu
 
