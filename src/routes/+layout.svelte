@@ -2870,7 +2870,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 											{@const rel = displayFileChangePath(ch)}
 											<div class="fc">
 												<span class="kind {fileChangeClass(ch)}" aria-label={fileChangeKind(ch)} title={fileChangeKind(ch)}>{fileChangeSymbol(ch)}</span>
-												{#if !rel.startsWith('/')}
+												{#if !rel.startsWith('/') && !activeRemote}
 													<button
 														type="button"
 														class="path path-link"

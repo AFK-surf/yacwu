@@ -100,6 +100,7 @@ These return clear errors/hide themselves in the UI for remote sessions, and
 have protocol-level paths forward (mostly the app-server `fs/*` API):
 
 - the file browser (reads yacwu's local filesystem today);
+- the Git changes viewer (runs `git` on yacwu's machine in the session cwd);
 - image attachments (staged as local temp files codex reads by path);
 - codex profiles (files in the *local* `$CODEX_HOME`);
 - "session in use elsewhere" detection (scans local `/proc`).
