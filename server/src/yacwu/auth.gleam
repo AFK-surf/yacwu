@@ -1,48 +1,65 @@
-//// Forward-auth support.
+//// Authentication configuration: read from the environment once at server
+//// start into an immutable value that the router carries for the lifetime of
+//// the process.
 ////
-//// When `YACWU_REMOTE_USERS` is set to a comma-separated allowlist, every
-//// request must carry a `Remote-User` header whose value is in the list. This
-//// is the header reverse proxies (Authelia, Traefik forward-auth,
-//// oauth2-proxy, …) inject after authenticating the user. When the variable
-//// is empty/unset, auth is off.
+//// Two mechanisms, usable together:
 ////
-//// The `--remote-user` flag sets `YACWU_REMOTE_USERS`, so the same code path
-//// covers every way of running the server.
+//// - forward auth: `YACWU_REMOTE_USERS` (or the `--remote-user` flag, which
+////   sets that variable) is a comma-separated allowlist; every request must
+////   carry a `Remote-User` header — injected by an authenticating reverse
+////   proxy (Authelia, Traefik forward-auth, oauth2-proxy, …) — whose value
+////   is in the list.
+//// - built-in OAuth login: see `yacwu/oauth`.
+////
+//// With neither configured the server refuses to start unless
+//// `YACWU_INSECURE_SKIP_AUTH=1` explicitly opts into serving without
+//// authentication.
 
 import envoy
 import gleam/list
+import gleam/option.{type Option}
+import gleam/result
 import gleam/string
+import yacwu/oauth
+
+pub type Config {
+  Config(
+    remote_users: List(String),
+    oauth: Option(oauth.Config),
+    insecure_skip_auth: Bool,
+  )
+}
 
 pub type Denial {
   Denial(status: Int, message: String)
 }
 
-/// The configured allowlist (empty = auth disabled). Read per-request.
-pub fn allowed_remote_users() -> List(String) {
-  envoy.get("YACWU_REMOTE_USERS")
-  |> fn(raw) {
-    case raw {
-      Ok(raw) -> raw
-      Error(_) -> ""
-    }
-  }
-  |> string.split(",")
-  |> list.map(string.trim)
-  |> list.filter(fn(user) { user != "" })
+/// Read the authentication configuration from the environment. Called once,
+/// at server start.
+pub fn load() -> Config {
+  Config(
+    remote_users: envoy.get("YACWU_REMOTE_USERS")
+      |> result.unwrap("")
+      |> string.split(",")
+      |> list.map(string.trim)
+      |> list.filter(fn(user) { user != "" }),
+    oauth: oauth.load(),
+    insecure_skip_auth: envoy.get("YACWU_INSECURE_SKIP_AUTH") == Ok("1"),
+  )
 }
 
-/// True when the operator explicitly opted into running without any
-/// authentication (`YACWU_INSECURE_SKIP_AUTH=1`). With neither forward auth
-/// nor OAuth configured, the server refuses to serve unless this is set —
-/// failing closed rather than silently open.
-pub fn insecure_skip_auth() -> Bool {
-  envoy.get("YACWU_INSECURE_SKIP_AUTH") == Ok("1")
+/// True when at least one authentication mechanism is configured.
+pub fn configured(config: Config) -> Bool {
+  config.remote_users != [] || option.is_some(config.oauth)
 }
 
 /// Returns `Error(denial)` when the request must be rejected, `Ok(Nil)` when
-/// allowed. No-op when no allowlist is configured.
-pub fn check_remote_user(header: Result(String, Nil)) -> Result(Nil, Denial) {
-  case allowed_remote_users() {
+/// allowed. No-op when the allowlist is empty.
+pub fn check_remote_user(
+  header: Result(String, Nil),
+  allowed allowed: List(String),
+) -> Result(Nil, Denial) {
+  case allowed {
     [] -> Ok(Nil)
     allowed -> {
       let user = case header {

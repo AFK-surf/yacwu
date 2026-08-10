@@ -42,6 +42,7 @@ pub type Context {
     store: Store,
     profile_store: profiles.Store,
     static_dir: String,
+    auth: auth.Config,
   )
 }
 
@@ -52,7 +53,7 @@ pub fn handler(
 ) -> fn(Request(Connection)) -> Response(ResponseData) {
   let debug = envoy.get("YACWU_DEBUG") == Ok("1")
   fn(req) {
-    case gate(req) {
+    case gate(ctx.auth, req) {
       Error(resp) -> resp
       Ok(Nil) ->
         case debug {
@@ -91,34 +92,36 @@ fn monotonic_ms() -> Int {
 
 // -- Authentication gate and /oauth endpoints ---------------------------------
 
-/// Decide whether a request may proceed, or answer it here. Two mechanisms,
+/// Decide whether a request may proceed, or answer it here, from the
+/// immutable auth configuration loaded at server start. Two mechanisms,
 /// usable together:
 ///
 /// - forward auth: a `Remote-User` header from an authenticating reverse
-///   proxy, checked against the `YACWU_REMOTE_USERS` allowlist;
+///   proxy, checked against the configured allowlist;
 /// - built-in OAuth login: a signed session cookie set by `/oauth/callback`.
 ///
 /// A valid session cookie or a valid forward-auth header admits the request.
 /// Otherwise, when OAuth is configured, browsers are sent through the login
 /// flow (API callers get a plain 401); with forward auth alone the original
-/// 401/403 denials apply. With neither configured the server fails closed:
-/// every request is refused unless `YACWU_INSECURE_SKIP_AUTH=1` explicitly
-/// opts into running open.
-fn gate(req: Request(Connection)) -> Result(Nil, Response(ResponseData)) {
-  let oauth_config = oauth.load()
-  case request.path_segments(req), oauth_config {
+/// 401/403 denials apply. With neither configured requests pass — boot only
+/// gets that far when `YACWU_INSECURE_SKIP_AUTH=1` opted into running open.
+fn gate(
+  conf: auth.Config,
+  req: Request(Connection),
+) -> Result(Nil, Response(ResponseData)) {
+  case request.path_segments(req), conf.oauth {
     // The login endpoints must be reachable while unauthenticated.
     ["oauth", "login"], Some(config) -> Error(oauth_login(req, config))
     ["oauth", "callback"], Some(config) -> Error(oauth_callback(req, config))
     ["oauth", "logout"], Some(_) -> Error(oauth_logout(req))
     _, _ -> {
-      let session = case oauth_config {
+      let session = case conf.oauth {
         Some(config) ->
           oauth.session_user(
             cookie_value(req, oauth.session_cookie),
             allowed: config.allowed_users,
             now: oauth.now(),
-            secret: oauth.cookie_secret(),
+            secret: config.secret,
           )
         None -> Error(Nil)
       }
@@ -126,23 +129,16 @@ fn gate(req: Request(Connection)) -> Result(Nil, Response(ResponseData)) {
         Ok(_user) -> Ok(Nil)
         Error(_) -> {
           let forward =
-            auth.check_remote_user(request.get_header(req, "remote-user"))
-          case auth.allowed_remote_users(), forward, oauth_config {
+            auth.check_remote_user(
+              request.get_header(req, "remote-user"),
+              allowed: conf.remote_users,
+            )
+          case conf.remote_users, forward, conf.oauth {
             [_, ..], Ok(Nil), _ -> Ok(Nil)
             _, _, Some(_) -> Error(login_required(req))
             [_, ..], Error(denial), None ->
               Error(text_response(denial.status, denial.message))
-            [], _, None ->
-              case auth.insecure_skip_auth() {
-                True -> Ok(Nil)
-                False ->
-                  Error(text_response(
-                    403,
-                    "no authentication configured — set YACWU_REMOTE_USERS "
-                      <> "(forward auth), YACWU_OAUTH_* (built-in OAuth), or "
-                      <> "YACWU_INSECURE_SKIP_AUTH=1 to run without auth",
-                  ))
-              }
+            [], _, None -> Ok(Nil)
           }
         }
       }
@@ -193,7 +189,7 @@ fn oauth_login(
             #("next", json.string(next)),
           ],
           expires_at: oauth.now() + oauth.login_ttl,
-          secret: oauth.cookie_secret(),
+          secret: config.secret,
         )
       oauth.authorize_url(endpoints.auth_url, [
         #("response_type", "code"),
@@ -223,11 +219,7 @@ fn oauth_callback(
     "" ->
       case
         cookie_value(req, oauth.login_cookie)
-        |> result.try(oauth.open(
-          _,
-          now: oauth.now(),
-          secret: oauth.cookie_secret(),
-        ))
+        |> result.try(oauth.open(_, now: oauth.now(), secret: config.secret))
       {
         Error(_) ->
           text_response(
@@ -260,7 +252,7 @@ fn oauth_callback(
                     oauth.seal(
                       [#("user", json.string(user))],
                       expires_at: oauth.now() + config.session_ttl,
-                      secret: oauth.cookie_secret(),
+                      secret: config.secret,
                     ),
                     config.session_ttl,
                   )

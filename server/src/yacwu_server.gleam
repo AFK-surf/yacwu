@@ -15,7 +15,6 @@ import yacwu/auth
 import yacwu/codex
 import yacwu/config
 import yacwu/model_state
-import yacwu/oauth
 import yacwu/profiles
 import yacwu/router
 import yacwu/unix_proxy
@@ -54,20 +53,13 @@ pub fn main() -> Nil {
 }
 
 fn serve(conf: config.Config) -> Nil {
-  // Generate the OAuth cookie-signing secret (when one wasn't provided)
-  // before the first request, so concurrent logins share it.
-  let oauth_enabled = case oauth.load() {
-    Some(_) -> {
-      oauth.ensure_cookie_secret()
-      True
-    }
-    None -> False
-  }
+  // Authentication configuration is immutable: loaded here, once, and
+  // carried by the router for the lifetime of the process.
+  let auth_config = auth.load()
 
   // Fail closed: with no authentication configured, refuse to start unless
   // the operator explicitly opted into running open.
-  let forward_enabled = auth.allowed_remote_users() != []
-  case oauth_enabled || forward_enabled || auth.insecure_skip_auth() {
+  case auth.configured(auth_config) || auth_config.insecure_skip_auth {
     True -> Nil
     False -> {
       io.println_error(
@@ -96,6 +88,7 @@ authentication (e.g. bound to localhost only).",
       store: store_name,
       profile_store: profile_store_name,
       static_dir: conf.static_dir,
+      auth: auth_config,
     )
 
   let listen = case conf.unix {
@@ -134,11 +127,11 @@ authentication (e.g. bound to localhost only).",
     envoy.get("YACWU_CWD")
     |> result.unwrap("(home)")
   io.println("  working directory for new sessions: " <> cwd_note)
-  case oauth_enabled {
-    True -> io.println("  OAuth login: enabled")
-    False -> Nil
+  case auth_config.oauth {
+    Some(_) -> io.println("  OAuth login: enabled")
+    None -> Nil
   }
-  case oauth_enabled || forward_enabled {
+  case auth.configured(auth_config) {
     True -> Nil
     False ->
       io.println(

@@ -16,8 +16,9 @@
 //// State that must survive the round-trip to the provider (CSRF state, PKCE
 //// verifier, post-login destination) travels in a short-lived signed cookie,
 //// so the flow is stateless server-side. The signing secret is
-//// `YACWU_OAUTH_COOKIE_SECRET`; when unset a random per-process secret is
-//// generated at boot (logins then survive only until the next restart).
+//// `YACWU_OAUTH_COOKIE_SECRET`; when unset a random secret is generated into
+//// the config at load time (sessions then survive only until the next
+//// restart).
 
 import envoy
 import gleam/bit_array
@@ -65,6 +66,7 @@ pub type Config {
     allowed_users: List(String),
     redirect_url: Option(String),
     session_ttl: Int,
+    secret: BitArray,
   )
 }
 
@@ -75,7 +77,7 @@ pub type Endpoints {
 
 /// Read the OAuth configuration from the environment. `None` means OAuth is
 /// disabled: no client id, or neither an issuer nor explicit auth+token URLs.
-/// Read per-request, like the forward-auth allowlist.
+/// Called once, at server start (via `auth.load`).
 pub fn load() -> Option(Config) {
   case env("YACWU_OAUTH_CLIENT_ID") {
     Error(_) -> None
@@ -109,6 +111,7 @@ pub fn load() -> Option(Config) {
                 int.parse(raw) |> result.replace_error(Nil)
               })
               |> result.unwrap(default_session_ttl),
+            secret: cookie_secret(),
           ))
       }
     }
@@ -135,26 +138,14 @@ fn split_users(raw: String) -> List(String) {
 
 // -- Cookie secret ------------------------------------------------------------
 
-/// Make sure a signing secret exists before the first request, so concurrent
-/// first logins can't each invent their own. Called at server start when
-/// OAuth is enabled.
-pub fn ensure_cookie_secret() -> Nil {
+/// The cookie-signing key material: `YACWU_OAUTH_COOKIE_SECRET`, or a fresh
+/// random secret when unset. Resolved into the config at load time, so every
+/// request signs and verifies with the same key.
+fn cookie_secret() -> BitArray {
   case env(secret_var) {
-    Ok(_) -> Nil
-    Error(_) ->
-      envoy.set(
-        secret_var,
-        bit_array.base16_encode(crypto.strong_random_bytes(32)),
-      )
+    Ok(value) -> bit_array.from_string(value)
+    Error(_) -> crypto.strong_random_bytes(32)
   }
-}
-
-/// The cookie-signing secret as key material.
-pub fn cookie_secret() -> BitArray {
-  ensure_cookie_secret()
-  env(secret_var)
-  |> result.unwrap("")
-  |> bit_array.from_string
 }
 
 // -- Signed, expiring values --------------------------------------------------
@@ -190,8 +181,9 @@ pub fn open(
 }
 
 /// The logged-in user carried by a session cookie, if the cookie verifies,
-/// hasn't expired, and the user is (still) in the allowlist. The allowlist is
-/// re-checked per request so removing a user takes effect immediately.
+/// hasn't expired, and the user is in the allowlist. The allowlist applies on
+/// every request, so a cookie signed under an older allowlist doesn't outlive
+/// the user's removal from it.
 pub fn session_user(
   cookie: Result(String, Nil),
   allowed allowed: List(String),

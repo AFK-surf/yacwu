@@ -12,6 +12,7 @@ const oauth_vars = [
   "YACWU_OAUTH_AUTH_URL", "YACWU_OAUTH_TOKEN_URL", "YACWU_OAUTH_USERINFO_URL",
   "YACWU_OAUTH_SCOPES", "YACWU_OAUTH_USER_CLAIM", "YACWU_OAUTH_USERS",
   "YACWU_OAUTH_REDIRECT_URL", "YACWU_OAUTH_SESSION_TTL",
+  "YACWU_OAUTH_COOKIE_SECRET",
 ]
 
 fn with_env(vars: List(#(String, String)), run: fn() -> a) -> a {
@@ -91,6 +92,25 @@ pub fn explicit_endpoints_skip_discovery_test() {
       token_url: "https://idp.example.com/token",
       userinfo_url: Some("https://idp.example.com/userinfo"),
     ))
+}
+
+pub fn cookie_secret_taken_from_env_test() {
+  use <- with_env([
+    #("YACWU_OAUTH_CLIENT_ID", "yacwu"),
+    #("YACWU_OAUTH_ISSUER", "https://idp.example.com"),
+    #("YACWU_OAUTH_COOKIE_SECRET", "sekrit"),
+  ])
+  let assert Some(config) = oauth.load()
+  assert config.secret == <<"sekrit":utf8>>
+}
+
+pub fn cookie_secret_generated_when_unset_test() {
+  use <- with_env([
+    #("YACWU_OAUTH_CLIENT_ID", "yacwu"),
+    #("YACWU_OAUTH_ISSUER", "https://idp.example.com"),
+  ])
+  let assert Some(config) = oauth.load()
+  assert bit_array.byte_size(config.secret) == 32
 }
 
 // -- Sealed cookie values -----------------------------------------------------
