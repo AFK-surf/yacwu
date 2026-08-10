@@ -34,6 +34,15 @@ Environment:
   HOST, PORT          fallbacks for --host / --port
   YACWU_CWD           working directory for new Codex sessions
   YACWU_STATIC        directory holding the built web UI (default: ./build)
+  YACWU_REMOTE_USERS  fallback for --remote-user
+  YACWU_OAUTH_*       built-in OAuth/OIDC login: ISSUER (or AUTH_URL +
+                      TOKEN_URL), CLIENT_ID, CLIENT_SECRET, USERINFO_URL,
+                      SCOPES, USER_CLAIM, USERS, REDIRECT_URL, COOKIE_SECRET,
+                      SESSION_TTL — see the README's Authentication section
+  YACWU_INSECURE_SKIP_AUTH=1
+                      run without any authentication (otherwise the server
+                      refuses to start when neither forward auth nor OAuth
+                      is configured)
 "
 
 pub type Config {

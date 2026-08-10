@@ -11,6 +11,7 @@ import gleam/option.{None, Some}
 import gleam/otp/static_supervisor as supervisor
 import gleam/result
 import mist
+import yacwu/auth
 import yacwu/codex
 import yacwu/config
 import yacwu/model_state
@@ -52,6 +53,25 @@ pub fn main() -> Nil {
 }
 
 fn serve(conf: config.Config) -> Nil {
+  // Authentication configuration is immutable: loaded here, once, and
+  // carried by the router for the lifetime of the process.
+  let auth_config = auth.load()
+
+  // Fail closed: with no authentication configured, refuse to start unless
+  // the operator explicitly opted into running open.
+  case auth.configured(auth_config) || auth_config.insecure_skip_auth {
+    True -> Nil
+    False -> {
+      io.println_error(
+        "yacwu: no authentication configured, refusing to start.
+Configure forward auth (--remote-user / YACWU_REMOTE_USERS), built-in OAuth
+(YACWU_OAUTH_*), or set YACWU_INSECURE_SKIP_AUTH=1 to run without
+authentication (e.g. bound to localhost only).",
+      )
+      halt(1)
+    }
+  }
+
   let codex_name = process.new_name("yacwu_codex")
   let store_name = process.new_name("yacwu_models")
   let profile_store_name = process.new_name("yacwu_profiles")
@@ -68,6 +88,7 @@ fn serve(conf: config.Config) -> Nil {
       store: store_name,
       profile_store: profile_store_name,
       static_dir: conf.static_dir,
+      auth: auth_config,
     )
 
   let listen = case conf.unix {
@@ -106,5 +127,16 @@ fn serve(conf: config.Config) -> Nil {
     envoy.get("YACWU_CWD")
     |> result.unwrap("(home)")
   io.println("  working directory for new sessions: " <> cwd_note)
+  case auth_config.oauth {
+    Some(_) -> io.println("  OAuth login: enabled")
+    None -> Nil
+  }
+  case auth.configured(auth_config) {
+    True -> Nil
+    False ->
+      io.println(
+        "  WARNING: authentication disabled (YACWU_INSECURE_SKIP_AUTH=1)",
+      )
+  }
   process.sleep_forever()
 }
