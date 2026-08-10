@@ -125,9 +125,6 @@
 	let sidebarToggleEl = $state<HTMLButtonElement | null>(null);
 	let imageInputEl = $state<HTMLInputElement | null>(null);
 	let composerTextareaEl = $state<HTMLTextAreaElement | null>(null);
-	// Composer height: the textarea grows with its content up to a ceiling and
-	// scrolls past it. Expanding raises that ceiling for long drafts.
-	let composerExpanded = $state(false);
 	// Reasoning efforts offered by the active session's model (thread /model).
 	let modelEfforts = $state<Record<string, string[]>>({});
 	let effortPending = $state(false);
@@ -1655,15 +1652,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		composerTextareaEl.style.overflowY = composerTextareaEl.scrollHeight > maxHeight ? 'auto' : 'hidden';
 	}
 
-	/** Raise or lower the composer's height ceiling, keeping the caret in place. */
-	function toggleComposerExpanded() {
-		composerExpanded = !composerExpanded;
-		void tick().then(() => {
-			resizeComposer();
-			composerTextareaEl?.focus();
-		});
-	}
-
 	$effect(() => {
 		input;
 		void tick().then(resizeComposer);
@@ -3098,7 +3086,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							</div>
 						{/if}
 					</div>
-					<div class="composer" class:expanded={composerExpanded}>
+					<div class="composer">
 						<input
 							bind:this={imageInputEl}
 							class="image-input"
@@ -3128,24 +3116,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								? slashOptionId(slashMatches[slashIndex])
 								: undefined}
 						></textarea>
-						<button
-							class="composer-expand"
-							type="button"
-							onclick={toggleComposerExpanded}
-							aria-pressed={composerExpanded}
-							title={composerExpanded ? 'Collapse the composer' : 'Expand the composer'}
-							aria-label={composerExpanded ? 'Collapse the composer' : 'Expand the composer'}
-						>
-							<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-								{#if composerExpanded}
-									<path d="M9 3v6H3" />
-									<path d="M15 21v-6h6" />
-								{:else}
-									<path d="M21 9V3h-6" />
-									<path d="M3 15v6h6" />
-								{/if}
-							</svg>
-						</button>
 						<div class="composer-actions">
 							<button class="attach" type="button" onclick={chooseImages} title="Attach images" aria-label="Attach images">
 								<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -5087,9 +5057,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		white-space: pre-wrap;
 	}
 
+	/* No rule above the composer: the card is lifted by shadow, and a hairline
+	   here would read as the border the card deliberately drops. The block
+	   padding keeps that shadow clear of the viewport edge. */
 	.composer-shell {
-		padding: var(--space-2xs) var(--space-2xs) calc(var(--space-2xs) + env(safe-area-inset-bottom));
-		border-block-start: var(--rule-hair) solid var(--color-rule);
+		padding: var(--space-xs) var(--space-2xs) calc(var(--space-xs) + env(safe-area-inset-bottom));
 		background: var(--color-paper);
 	}
 
@@ -5189,25 +5161,26 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		white-space: nowrap;
 	}
 
-	/* Two rows: the message spans the card's width with the expand affordance
-	   in its top corner, and the action row sits beneath it. */
+	/* Two rows: the message spans the card's width, the action row sits under it. */
 	.composer {
 		display: grid;
 		grid-template-areas:
-			'message expand'
-			'actions actions';
-		grid-template-columns: minmax(0, 1fr) auto;
+			'message'
+			'actions';
+		grid-template-columns: minmax(0, 1fr);
 		gap: var(--space-3xs);
 		align-items: start;
 		padding: var(--space-2xs);
-		border: var(--rule-hair) solid var(--color-rule);
+		border: 0;
 		border-radius: var(--radius-xl);
 		background: var(--color-paper);
-		box-shadow: var(--shadow-card);
+		/* No hairline: the card is separated from the canvas by light alone. */
+		box-shadow: var(--shadow-float);
+		transition: box-shadow var(--dur-short) var(--ease-out);
 	}
 
 	.composer:focus-within {
-		border-color: var(--color-rule-2);
+		box-shadow: var(--shadow-float-raised);
 	}
 
 	.image-input {
@@ -5228,8 +5201,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		gap: var(--space-2xs);
 	}
 
-	.attach,
-	.composer-expand {
+	.attach {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
@@ -5240,23 +5212,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		background: transparent;
 		color: var(--color-neutral);
 		font-size: var(--text-sm);
-	}
-
-	.composer-expand {
-		grid-area: expand;
-		min-height: var(--control-height-compact);
-		width: var(--control-height-compact);
-		min-width: var(--control-height-compact);
-		border: var(--rule-hair) solid transparent;
-		border-radius: var(--radius-input);
-		color: var(--color-muted);
-		cursor: pointer;
-		transition: background-color var(--dur-micro) var(--ease-out);
-	}
-
-	.composer-expand .control-icon {
-		width: var(--space-xs);
-		height: var(--space-xs);
 	}
 
 	/* The effort picker reads as a quiet label plus chevron; a transparent
@@ -5323,12 +5278,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		line-height: 1.4;
 		overflow-y: hidden;
 		resize: none;
-	}
-
-	/* Expanded: a taller floor and ceiling for drafting long prompts. */
-	.composer.expanded textarea {
-		min-height: min(18rem, 46dvh);
-		max-height: min(28rem, 62dvh);
 	}
 
 	textarea:focus-visible {
@@ -5496,7 +5445,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 		.mini.ghost:hover,
 		.attach:hover,
-		.composer-expand:hover,
 		.effort:hover,
 		.stop:hover,
 		.raw-toggle:hover,
@@ -5541,7 +5489,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.session-info-trigger:active,
 	.session-info-close:active,
 	.attach:active,
-	.composer-expand:active,
 	.send:active,
 	.welcome-action:active,
 	.sidebar-scrim:active,
@@ -5746,7 +5693,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.session-info-trigger,
 		.session-info-close,
 		.attach,
-		.composer-expand,
 		.effort,
 		.send,
 		.welcome-action,
@@ -5761,8 +5707,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		}
 
 		.delete-session,
-		.raw-toggle,
-		.composer-expand {
+		.raw-toggle {
 			width: var(--control-height);
 		}
 	}

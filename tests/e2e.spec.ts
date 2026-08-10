@@ -173,25 +173,22 @@ test('mobile drawer, compact header, composer growth, and archive undo remain us
 
 	await page.setViewportSize({ width: 1280, height: 800 });
 	await page.goto(`/s/${activeId}`);
-	// The composer grows with its content up to a ceiling, then scrolls; the
-	// expand toggle raises that ceiling and restores it.
+	// The composer grows with its content up to a ceiling, then scrolls.
 	const desktopTextarea = page.locator('.composer textarea');
+	const short = await desktopTextarea.evaluate((element) => element.getBoundingClientRect().height);
 	await desktopTextarea.fill(Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n'));
 	const capped = await desktopTextarea.evaluate((element) => ({
 		height: element.getBoundingClientRect().height,
 		max: Number.parseFloat(getComputedStyle(element).maxHeight),
 		overflowY: element.style.overflowY
 	}));
+	expect(capped.height).toBeGreaterThan(short);
 	expect(capped.height).toBeLessThanOrEqual(capped.max + 1);
 	expect(capped.overflowY).toBe('auto');
-	await page.locator('.composer-expand').click();
-	const expanded = await desktopTextarea.evaluate((element) => element.getBoundingClientRect().height);
-	expect(expanded).toBeGreaterThan(capped.height);
-	await page.locator('.composer-expand').click();
+	await desktopTextarea.fill('');
 	await expect
 		.poll(() => desktopTextarea.evaluate((element) => element.getBoundingClientRect().height))
-		.toBeLessThanOrEqual(capped.height + 1);
-	await desktopTextarea.fill('');
+		.toBeLessThanOrEqual(short + 1);
 
 	await expect(page.locator('.drawer-close')).toBeVisible();
 	await expect(page.locator('#session-sidebar')).not.toHaveAttribute('inert', '');
