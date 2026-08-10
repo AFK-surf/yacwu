@@ -125,6 +125,12 @@
 	let sidebarToggleEl = $state<HTMLButtonElement | null>(null);
 	let imageInputEl = $state<HTMLInputElement | null>(null);
 	let composerTextareaEl = $state<HTMLTextAreaElement | null>(null);
+	// Composer height: the textarea grows with its content up to a ceiling and
+	// scrolls past it. Expanding raises that ceiling for long drafts.
+	let composerExpanded = $state(false);
+	// Reasoning efforts offered by the active session's model (thread /model).
+	let modelEfforts = $state<Record<string, string[]>>({});
+	let effortPending = $state(false);
 	let transcriptScrollTop = $state(0);
 	let transcriptViewportHeight = $state(0);
 	let transcriptHeightVersion = $state(0);
@@ -150,6 +156,7 @@
 	const active = $derived(activeId ? threads[activeId] : null);
 	const activeSummary = $derived(sessions.find((s) => s.id === activeId) ?? null);
 	const activeConfig = $derived(activeId ? sessionConfigs[activeId] : null);
+	const activeEfforts = $derived(activeId ? (modelEfforts[activeId] ?? []) : []);
 	const activeHost = $derived(activeId ? sessionHost(activeId) : LOCAL_HOST);
 	const activeRemote = $derived(isRemoteHost(activeHost));
 	const activeHostState = $derived(
@@ -841,6 +848,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			})
 		]);
 		const model = modelResult.status === 'fulfilled' ? modelResult.value : null;
+		if (model) rememberEfforts(id, model);
 		const profile = profileResult.status === 'fulfilled' ? profileResult.value.profile ?? null : previous?.profile ?? null;
 		if (!model && !previous) return;
 		sessionConfigs[id] = {
@@ -848,6 +856,40 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			effort: model?.effort ?? previous.effort,
 			profile
 		};
+	}
+
+	/** Cache the reasoning efforts the session's current model accepts. */
+	function rememberEfforts(id: string, settings: ModelState) {
+		const choice = settings.models.find((m) => m.id === settings.model);
+		modelEfforts[id] = choice?.efforts ?? [];
+	}
+
+	function effortLabel(effort: string): string {
+		return effort.charAt(0).toUpperCase() + effort.slice(1);
+	}
+
+	/** Composer effort picker: same thread /model call as `/model --effort`. */
+	async function setComposerEffort(select: HTMLSelectElement) {
+		const id = activeId;
+		const current = id ? sessionConfigs[id]?.effort : null;
+		const effort = select.value;
+		if (!id || !current || effort === current) return;
+		effortPending = true;
+		try {
+			const { ok, data } = await postCmd(id, 'model', { effort });
+			if (ok) {
+				sessionConfigs[id] = {
+					model: data.model,
+					effort: data.effort,
+					profile: sessionConfigs[id]?.profile ?? null
+				};
+			} else {
+				select.value = current;
+				addLocalNote(id, data.error ?? 'failed to change reasoning effort', 'err');
+			}
+		} finally {
+			effortPending = false;
+		}
 	}
 
 	async function openSession(id: string, force: boolean) {
@@ -1132,6 +1174,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							effort: settings.effort,
 							profile: sessionConfigs[id]?.profile ?? null
 						};
+						rememberEfforts(id, settings);
 					}
 					addLocalNote(
 						id,
@@ -1160,6 +1203,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						effort: data.effort,
 						profile: sessionConfigs[id]?.profile ?? null
 					};
+					// A new model may accept a different set of efforts.
+					void loadSessionConfig(id);
 				}
 				break;
 			}
@@ -1608,6 +1653,15 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		const nextHeight = Math.min(composerTextareaEl.scrollHeight, maxHeight);
 		composerTextareaEl.style.height = `${nextHeight}px`;
 		composerTextareaEl.style.overflowY = composerTextareaEl.scrollHeight > maxHeight ? 'auto' : 'hidden';
+	}
+
+	/** Raise or lower the composer's height ceiling, keeping the caret in place. */
+	function toggleComposerExpanded() {
+		composerExpanded = !composerExpanded;
+		void tick().then(() => {
+			resizeComposer();
+			composerTextareaEl?.focus();
+		});
 	}
 
 	$effect(() => {
@@ -3044,7 +3098,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							</div>
 						{/if}
 					</div>
-					<div class="composer">
+					<div class="composer" class:expanded={composerExpanded}>
 						<input
 							bind:this={imageInputEl}
 							class="image-input"
@@ -3053,11 +3107,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							multiple
 							onchange={onImagesSelected}
 						/>
-						<button class="attach" type="button" onclick={chooseImages} title="Attach images" aria-label="Attach images">
-							<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-								<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-							</svg>
-						</button>
 						<textarea
 							bind:this={composerTextareaEl}
 							aria-label="Message Codex"
@@ -3080,20 +3129,65 @@ Do not modify files, source, git state, permissions, configuration, or any other
 								: undefined}
 						></textarea>
 						<button
-							class="send"
+							class="composer-expand"
 							type="button"
-							onclick={send}
-							disabled={sendingMessage || (!input.trim() && selectedImages.length === 0)}
-							aria-label={sendingMessage ? 'Sending message' : 'Send message'}
-							aria-busy={sendingMessage}
+							onclick={toggleComposerExpanded}
+							aria-pressed={composerExpanded}
+							title={composerExpanded ? 'Collapse the composer' : 'Expand the composer'}
+							aria-label={composerExpanded ? 'Collapse the composer' : 'Expand the composer'}
 						>
 							<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-								<path d="m18 15-6-6-6 6" />
-								<path d="M12 9v12" />
+								{#if composerExpanded}
+									<path d="M9 3v6H3" />
+									<path d="M15 21v-6h6" />
+								{:else}
+									<path d="M21 9V3h-6" />
+									<path d="M3 15v6h6" />
+								{/if}
 							</svg>
 						</button>
+						<div class="composer-actions">
+							<button class="attach" type="button" onclick={chooseImages} title="Attach images" aria-label="Attach images">
+								<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+									<path d="M12 5v14M5 12h14" />
+								</svg>
+							</button>
+							<div class="composer-actions-end">
+								{#if activeConfig && activeEfforts.length > 0}
+									<div class="effort">
+										<span class="effort-label" aria-hidden="true">{effortLabel(activeConfig.effort)}</span>
+										<svg class="effort-chevron" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+											<path d="m6 9 6 6 6-6" />
+										</svg>
+										<select
+											class="effort-select"
+											aria-label="Reasoning effort"
+											value={activeConfig.effort}
+											disabled={effortPending}
+											onchange={(event) => setComposerEffort(event.currentTarget)}
+										>
+											{#each activeEfforts as choice (choice)}
+												<option value={choice}>{effortLabel(choice)}</option>
+											{/each}
+										</select>
+									</div>
+								{/if}
+								<button
+									class="send"
+									type="button"
+									onclick={send}
+									disabled={sendingMessage || (!input.trim() && selectedImages.length === 0)}
+									aria-label={sendingMessage ? 'Sending message' : 'Send message'}
+									aria-busy={sendingMessage}
+								>
+									<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+										<path d="m18 15-6-6-6 6" />
+										<path d="M12 9v12" />
+									</svg>
+								</button>
+							</div>
+						</div>
 					</div>
-					<div class="composer-hint">Enter to send · Shift+Enter for a new line · ↑ for history · Slash commands supported</div>
 				</div>
 			{/if}
 		{/if}
@@ -5013,8 +5107,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	.composer,
 	.composer-anchor,
-	.attachments,
-	.composer-hint {
+	.attachments {
 		width: min(100%, var(--measure-reading));
 		margin-inline: auto;
 	}
@@ -5096,49 +5189,133 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		white-space: nowrap;
 	}
 
+	/* Two rows: the message spans the card's width with the expand affordance
+	   in its top corner, and the action row sits beneath it. */
 	.composer {
 		display: grid;
-		grid-template-areas: 'attach message send';
-		grid-template-columns: auto minmax(0, 1fr) auto;
+		grid-template-areas:
+			'message expand'
+			'actions actions';
+		grid-template-columns: minmax(0, 1fr) auto;
 		gap: var(--space-3xs);
-		align-items: end;
-		padding: var(--space-3xs);
-		border: var(--rule-hair) solid var(--color-rule-2);
-		border-radius: var(--radius-card);
+		align-items: start;
+		padding: var(--space-2xs);
+		border: var(--rule-hair) solid var(--color-rule);
+		border-radius: var(--radius-xl);
 		background: var(--color-paper);
+		box-shadow: var(--shadow-card);
 	}
 
 	.composer:focus-within {
-		border-color: var(--color-focus);
+		border-color: var(--color-rule-2);
 	}
 
 	.image-input {
 		display: none;
 	}
 
-	.attach {
-		grid-area: attach;
+	.composer-actions {
+		grid-area: actions;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-2xs);
+	}
+
+	.composer-actions-end {
+		display: flex;
+		align-items: center;
+		gap: var(--space-2xs);
+	}
+
+	.attach,
+	.composer-expand {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		gap: var(--space-2xs);
-		justify-self: start;
 		width: var(--control-height);
 		min-width: var(--control-height);
 		padding-inline: 0;
-		border-color: var(--color-rule);
-		background: var(--color-paper);
+		border-color: transparent;
+		background: transparent;
 		color: var(--color-neutral);
 		font-size: var(--text-sm);
+	}
+
+	.composer-expand {
+		grid-area: expand;
+		min-height: var(--control-height-compact);
+		width: var(--control-height-compact);
+		min-width: var(--control-height-compact);
+		border: var(--rule-hair) solid transparent;
+		border-radius: var(--radius-input);
+		color: var(--color-muted);
+		cursor: pointer;
+		transition: background-color var(--dur-micro) var(--ease-out);
+	}
+
+	.composer-expand .control-icon {
+		width: var(--space-xs);
+		height: var(--space-xs);
+	}
+
+	/* The effort picker reads as a quiet label plus chevron; a transparent
+	   native select sits over it so the platform menu and its accessible name
+	   stay intact while the label keeps the control at its text width. */
+	.effort {
+		position: relative;
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-3xs);
+		min-height: var(--control-height);
+		padding-inline: var(--space-2xs);
+		border-radius: var(--radius-input);
+		color: var(--color-muted);
+		transition: background-color var(--dur-micro) var(--ease-out);
+	}
+
+	.effort:focus-within {
+		outline: var(--rule-fine) solid var(--color-focus);
+		outline-offset: var(--focus-offset);
+	}
+
+	.effort-select {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		appearance: none;
+		border: 0;
+		background: transparent;
+		color: transparent;
+		cursor: pointer;
+		opacity: 0;
+	}
+
+	.effort-select:disabled {
+		cursor: progress;
+	}
+
+	.effort-label {
+		font-size: var(--text-base);
+	}
+
+	.effort-chevron {
+		flex: none;
+		width: var(--space-xs);
+		height: var(--space-xs);
+		fill: none;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 2;
 	}
 
 	textarea {
 		grid-area: message;
 		min-height: var(--control-height);
-		max-height: min(9rem, 36dvh);
-		/* Block padding centers a single 1.4em line inside the control height,
-		   so the placeholder and caret sit flush with the attach/send icons. */
-		padding: calc((var(--control-height) - 1.4em) / 2) var(--space-xs);
+		max-height: min(15rem, 42dvh);
+		padding: var(--space-2xs) var(--space-2xs) 0;
 		border-color: transparent;
 		background: transparent;
 		font-family: var(--font-body);
@@ -5148,20 +5325,25 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		resize: none;
 	}
 
+	/* Expanded: a taller floor and ceiling for drafting long prompts. */
+	.composer.expanded textarea {
+		min-height: min(18rem, 46dvh);
+		max-height: min(28rem, 62dvh);
+	}
+
 	textarea:focus-visible {
 		border-color: transparent;
 		outline-color: transparent;
 	}
 
 	.send {
-		grid-area: send;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		gap: var(--space-2xs);
 		width: var(--control-height);
 		min-width: var(--control-height);
 		padding-inline: 0;
+		border-radius: var(--radius-pill);
 		background: var(--color-accent);
 		color: var(--color-accent-ink);
 		font-size: var(--text-sm);
@@ -5235,14 +5417,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		stroke: currentColor;
 		stroke-linecap: round;
 		stroke-width: 1.75;
-	}
-
-	.composer-hint {
-		display: none;
-		padding-block-start: var(--space-2xs);
-		color: var(--color-muted);
-		font-size: var(--text-xs);
-		text-align: end;
 	}
 
 	.archive-toast {
@@ -5322,6 +5496,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 		.mini.ghost:hover,
 		.attach:hover,
+		.composer-expand:hover,
+		.effort:hover,
 		.stop:hover,
 		.raw-toggle:hover,
 		.files-trigger:hover,
@@ -5365,6 +5541,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.session-info-trigger:active,
 	.session-info-close:active,
 	.attach:active,
+	.composer-expand:active,
 	.send:active,
 	.welcome-action:active,
 	.sidebar-scrim:active,
@@ -5417,7 +5594,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		}
 
 		.composer {
-			grid-template-areas: 'attach message send';
+			padding: var(--space-xs);
 		}
 
 	}
@@ -5495,10 +5672,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.message-image img {
 			max-width: 32.5rem;
 		}
-
-		.composer-hint {
-			display: block;
-		}
 	}
 
 	@media (min-width: 90rem) {
@@ -5523,6 +5696,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.attachment,
 		.cwd-input,
 		.profile-input,
+		.effort,
 		textarea {
 			min-height: var(--control-height-compact);
 		}
@@ -5537,10 +5711,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			width: var(--control-height-compact);
 			min-width: var(--control-height-compact);
 			height: var(--control-height-compact);
-		}
-
-		textarea {
-			padding-block: calc((var(--control-height-compact) - 1.4em) / 2);
 		}
 
 		.session {
@@ -5576,6 +5746,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		.session-info-trigger,
 		.session-info-close,
 		.attach,
+		.composer-expand,
+		.effort,
 		.send,
 		.welcome-action,
 		.delete-session,
@@ -5589,7 +5761,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		}
 
 		.delete-session,
-		.raw-toggle {
+		.raw-toggle,
+		.composer-expand {
 			width: var(--control-height);
 		}
 	}

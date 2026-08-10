@@ -149,7 +149,12 @@ test('mobile drawer, compact header, composer growth, and archive undo remain us
 	expect(composerGeometry.textareaWidth).toBeGreaterThanOrEqual(190);
 	expect(composerGeometry.attachHeight).toBeGreaterThanOrEqual(44);
 	expect(composerGeometry.sendHeight).toBeGreaterThanOrEqual(44);
-	await expect(page.locator('.composer-hint')).toBeHidden();
+	// The message row sits above the action row at every width.
+	const composerRows = await page.locator('.composer').evaluate((element) => ({
+		textareaBottom: element.querySelector('textarea')!.getBoundingClientRect().bottom,
+		actionsTop: element.querySelector('.composer-actions')!.getBoundingClientRect().top
+	}));
+	expect(composerRows.actionsTop).toBeGreaterThanOrEqual(composerRows.textareaBottom - 1);
 	await textarea.fill('Reply with exactly: OK');
 	await page.locator('.send').click();
 	await expect(page.locator('.item.agent .body').last()).toContainText('OK', { timeout: 90_000 });
@@ -168,7 +173,26 @@ test('mobile drawer, compact header, composer growth, and archive undo remain us
 
 	await page.setViewportSize({ width: 1280, height: 800 });
 	await page.goto(`/s/${activeId}`);
-	await expect(page.locator('.composer-hint')).toBeVisible();
+	// The composer grows with its content up to a ceiling, then scrolls; the
+	// expand toggle raises that ceiling and restores it.
+	const desktopTextarea = page.locator('.composer textarea');
+	await desktopTextarea.fill(Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n'));
+	const capped = await desktopTextarea.evaluate((element) => ({
+		height: element.getBoundingClientRect().height,
+		max: Number.parseFloat(getComputedStyle(element).maxHeight),
+		overflowY: element.style.overflowY
+	}));
+	expect(capped.height).toBeLessThanOrEqual(capped.max + 1);
+	expect(capped.overflowY).toBe('auto');
+	await page.locator('.composer-expand').click();
+	const expanded = await desktopTextarea.evaluate((element) => element.getBoundingClientRect().height);
+	expect(expanded).toBeGreaterThan(capped.height);
+	await page.locator('.composer-expand').click();
+	await expect
+		.poll(() => desktopTextarea.evaluate((element) => element.getBoundingClientRect().height))
+		.toBeLessThanOrEqual(capped.height + 1);
+	await desktopTextarea.fill('');
+
 	await expect(page.locator('.drawer-close')).toBeVisible();
 	await expect(page.locator('#session-sidebar')).not.toHaveAttribute('inert', '');
 	await page.locator('.drawer-close').click();
