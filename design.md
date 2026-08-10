@@ -49,7 +49,10 @@ Coral is reserved for primary actions, current-location marks, focus, and small 
 - User prompts are unlabelled; their tinted surface is the identity cue.
 - Codex messages use no avatar or text label; their content spans the full transcript row.
 - Codex replies render GitHub-flavored Markdown on the client through structured tokens; raw HTML is inert and user prompts remain plain text.
-- The composer keeps a single row with icon-only attach and send controls at every width. Their accessible names remain available to assistive technology.
+- The composer is a two-row card at every width: the message spans the full width, and an action row beneath carries attach on the left, the reasoning-effort picker and send on the right. All icon-only controls keep accessible names for assistive technology.
+- The composer card carries no hairline. It is separated from the canvas by light alone (`--shadow-float`, deepening to `--shadow-float-raised` on focus) — the one surface in the app that reads as lifted rather than ruled.
+- The message area grows with its content to a fixed ceiling and scrolls past it. There is no expanded or full-screen composer mode.
+- The composer carries no keyboard-hint row. Enter, Shift+Enter, history recall, and slash completion are discovered through use and the slash popup.
 
 ## Spacing
 
