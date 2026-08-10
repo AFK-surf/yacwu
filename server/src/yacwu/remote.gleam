@@ -138,6 +138,7 @@ fi
 if [ -n \"$pid\" ] && [ -S \"$sock\" ]; then
   echo \"YACWU_PID $pid\"
   echo \"YACWU_HOME $HOME\"
+  echo \"YACWU_CODEX_HOME ${CODEX_HOME:-$HOME/.codex}\"
   echo \"YACWU_SOCK $sock\"
   exit 0
 fi
@@ -174,6 +175,7 @@ while [ ! -S \"$sock\" ]; do
 done
 echo \"YACWU_PID $pid\"
 echo \"YACWU_HOME $HOME\"
+echo \"YACWU_CODEX_HOME ${CODEX_HOME:-$HOME/.codex}\"
 echo \"YACWU_SOCK $sock\"
 exit 0
 "
@@ -228,11 +230,15 @@ type PortEvent {
   Timeout
 }
 
-/// Read a spawned command's combined output until it exits or the deadline
-/// passes (the port is killed on timeout).
+/// Ceiling on collected ssh output: a host streaming garbage must cost a
+/// truncated report, never unbounded memory.
+const max_collected_output = 1_000_000
+
+/// Read a spawned command's combined output until it exits, the deadline
+/// passes, or the size cap is hit (the port is killed on timeout/overflow).
 fn collect_port_output(port: Port, acc: String, deadline: Int) -> String {
   let remaining = deadline - monotonic_ms()
-  case remaining <= 0 {
+  case remaining <= 0 || string.byte_size(acc) > max_collected_output {
     True -> {
       let _ = erl_port_close(port)
       acc

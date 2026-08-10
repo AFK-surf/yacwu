@@ -20,7 +20,17 @@ pub type Frame {
   Ping(BitArray)
   Pong(BitArray)
   Close
+  /// The peer violated the protocol or the frame-size cap. The connection
+  /// must be dropped; a misbehaving server must never be able to make this
+  /// side buffer without bound.
+  Invalid(reason: String)
 }
+
+/// Hard cap on a single message (frame or reassembled fragments). Large
+/// legitimate payloads (fs reads, rollouts) stay well under this; anything
+/// bigger is a broken or hostile peer, and buffering it unboundedly would
+/// let a bad remote OOM the whole VM.
+pub const max_frame_bytes = 67_108_864
 
 /// Incremental frame decoder: raw TCP chunks in, complete frames out.
 /// `fragments` accumulates a fragmented message (initial opcode + payload).
@@ -42,7 +52,11 @@ pub fn push(decoder: Decoder, data: BitArray) -> #(List(Frame), Decoder) {
 
 fn decode_loop(decoder: Decoder, acc: List(Frame)) -> #(List(Frame), Decoder) {
   case parse_frame(decoder.buffer) {
-    Error(Nil) -> #(list.reverse(acc), decoder)
+    Error(Nil) ->
+      case oversized(decoder) {
+        Ok(reason) -> #(list.reverse([Invalid(reason), ..acc]), new_decoder())
+        Error(Nil) -> #(list.reverse(acc), decoder)
+      }
     Ok(#(fin, opcode, payload, rest)) -> {
       let #(frame, fragments) =
         assemble(decoder.fragments, fin, opcode, payload)
@@ -52,6 +66,30 @@ fn decode_loop(decoder: Decoder, acc: List(Frame)) -> #(List(Frame), Decoder) {
         None -> decode_loop(decoder, acc)
       }
     }
+  }
+}
+
+/// Whether the incomplete data already commits us past the cap: a header
+/// declaring an oversized frame, a raw buffer past the cap without a
+/// parseable frame, or fragment reassembly past the cap.
+fn oversized(decoder: Decoder) -> Result(String, Nil) {
+  let declared = case decoder.buffer {
+    <<_:size(9), 127:size(7), len:size(64), _:bits>> -> len
+    <<_:size(9), 126:size(7), len:size(16), _:bits>> -> len
+    <<_:size(9), len:size(7), _:bits>> -> len
+    _ -> 0
+  }
+  let fragment_size = case decoder.fragments {
+    Some(#(_, acc)) -> bit_array.byte_size(acc)
+    None -> 0
+  }
+  case
+    declared > max_frame_bytes
+    || bit_array.byte_size(decoder.buffer) > max_frame_bytes + 16
+    || fragment_size > max_frame_bytes
+  {
+    True -> Ok("message exceeds the 64 MiB frame cap")
+    False -> Error(Nil)
   }
 }
 
@@ -127,10 +165,14 @@ fn assemble(
       Some(data_frame(first, bit_array.concat([acc, payload]))),
       None,
     )
-    0, _, Some(#(first, acc)) -> #(
-      None,
-      Some(#(first, bit_array.concat([acc, payload]))),
-    )
+    0, _, Some(#(first, acc)) ->
+      case bit_array.byte_size(acc) > max_frame_bytes {
+        True -> #(
+          Some(Invalid("fragmented message exceeds the 64 MiB cap")),
+          None,
+        )
+        False -> #(None, Some(#(first, bit_array.concat([acc, payload]))))
+      }
     // Continuation with nothing pending: drop it.
     0, _, None -> #(None, None)
     // Unfragmented data frame.
@@ -159,6 +201,7 @@ pub fn encode(frame: Frame, mask_key: Option(BitArray)) -> BitArray {
     Ping(data) -> #(9, data)
     Pong(data) -> #(10, data)
     Close -> #(8, <<>>)
+    Invalid(_) -> #(8, <<>>)
   }
   let len = bit_array.byte_size(payload)
   let mask_bit = case mask_key {

@@ -145,3 +145,37 @@ pub fn random_key_is_base64_test() {
   should.equal(string.length(key), 24)
   should.be_true(list.all(string.to_graphemes(key), fn(_) { True }))
 }
+
+pub fn oversized_declared_frame_is_rejected_test() {
+  // A header declaring a payload beyond the cap must be rejected as soon as
+  // it is seen — long before any such payload is buffered. A bad remote can
+  // cost this side a disconnect, never unbounded memory.
+  let huge = ws.max_frame_bytes + 1
+  let header = <<
+    1:size(1),
+    0:size(3),
+    1:size(4),
+    0:size(1),
+    127:size(7),
+    huge:size(64),
+  >>
+  let #(frames, decoder) = ws.push(ws.new_decoder(), header)
+  let assert [ws.Invalid(_)] = frames
+  // The decoder resets; subsequent well-formed traffic parses again.
+  let #(frames, _) = ws.push(decoder, ws.encode(ws.Text("ok"), None))
+  should.equal(frames, [ws.Text("ok")])
+}
+
+pub fn absurd_declared_length_is_rejected_test() {
+  // 2^62 bytes "declared" — the poison-frame OOM vector.
+  let header = <<
+    1:size(1),
+    0:size(3),
+    1:size(4),
+    0:size(1),
+    127:size(7),
+    4_611_686_018_427_387_904:size(64),
+  >>
+  let #(frames, _) = ws.push(ws.new_decoder(), header)
+  let assert [ws.Invalid(_)] = frames
+}

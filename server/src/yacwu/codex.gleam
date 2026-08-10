@@ -757,6 +757,11 @@ fn handle_frames(
         // A close frame ends the connection; drop whatever followed it.
         ws.Close ->
           on_disconnect(state, "codex app-server closed the connection")
+        // Protocol violations (oversized/hostile frames) must cost this
+        // manager one disconnect+backoff, never unbounded memory: a bad
+        // remote is never allowed to take the tree down.
+        ws.Invalid(reason) ->
+          on_disconnect(state, "dropping connection: " <> reason)
         ws.Pong(_) | ws.Binary(_) -> handle_frames(state, rest)
       }
   }
