@@ -29,6 +29,7 @@
 	let {
 		threadId,
 		cwd,
+		host = '',
 		reveal = null,
 		refreshNonce = 0,
 		onchanges,
@@ -36,6 +37,8 @@
 	}: {
 		threadId: string;
 		cwd: string;
+		/** Remote host serving this session's files ('' or 'local' for this machine). */
+		host?: string;
 		reveal?: { path: string; line?: number | null; nonce: number } | null;
 		refreshNonce?: number;
 		onchanges: () => void;
@@ -373,7 +376,10 @@
 					<div class="fb-placeholder err">{file.message}</div>
 				{:else if file.kind === 'image'}
 					<div class="fb-image">
-						<img src={`/api/images?path=${encodeURIComponent(absolutePath(file.path))}`} alt={file.path} />
+						<img
+							src={`/api/images?path=${encodeURIComponent(absolutePath(file.path))}${host && host !== 'local' ? `&host=${encodeURIComponent(host)}` : ''}`}
+							alt={file.path}
+						/>
 					</div>
 				{:else if file.kind === 'binary'}
 					<div class="fb-placeholder">Binary file · {fmtBytes(file.size)}</div>

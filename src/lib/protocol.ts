@@ -20,6 +20,31 @@ export interface ThreadSummary {
 	forkedFromId?: string | null;
 	/** Ephemeral threads (side conversations) are never persisted. */
 	ephemeral?: boolean;
+	/** Which machine the session's codex app-server runs on ("local" or an ~/.ssh/config alias). */
+	host?: string;
+}
+
+/** A machine sessions can run on: local, or an ~/.ssh/config alias. */
+export interface HostInfo {
+	name: string;
+	kind: 'local' | 'remote';
+	state: 'connected' | 'connecting' | 'disconnected';
+	error?: string | null;
+}
+
+export const LOCAL_HOST = 'local';
+
+export function isRemoteHost(host: string | undefined | null): boolean {
+	return typeof host === 'string' && host !== '' && host !== LOCAL_HOST;
+}
+
+/**
+ * Query-string suffix routing an /api/threads request to a session's host.
+ * Empty for local (and unknown) hosts, so existing local behaviour and URLs
+ * are untouched.
+ */
+export function hostQuery(host: string | undefined | null): string {
+	return isRemoteHost(host) ? `?host=${encodeURIComponent(host as string)}` : '';
 }
 
 export interface TextContent {

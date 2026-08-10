@@ -30,16 +30,20 @@ import yacwu/codex.{type Codex}
 import yacwu/defaults
 import yacwu/files
 import yacwu/git
+import yacwu/hosts
 import yacwu/jsonx
 import yacwu/model_state.{type Store}
 import yacwu/oauth
 import yacwu/profiles
+import yacwu/remote
 import yacwu/session_lock
+import yacwu/ssh_config
 import yacwu/static_files
+import yacwu/workspace
 
 pub type Context {
   Context(
-    codex: Codex,
+    registry: hosts.Registry,
     store: Store,
     profile_store: profiles.Store,
     static_dir: String,
@@ -406,43 +410,184 @@ fn dispatch(
           |> response.set_header("cache-control", "no-cache")
           |> response.set_body(mist.Bytes(bytes_tree.new()))
       }
-    ["api", "account"], Get -> account(ctx)
-    ["api", "images"], Get -> image(req, include_body)
-    ["api", "profiles"], Get -> list_profiles()
-    ["api", "threads", id, "profile"], Get -> get_profile(ctx, id)
-    ["api", "threads", id, "profile"], Post -> post_profile(ctx, req, id)
-    ["api", "threads"], Get -> list_threads(ctx)
+    ["api", "hosts"], Get -> list_hosts(ctx)
+    ["api", "account"], Get -> {
+      use _, cx <- with_codex(ctx, req, None)
+      account(cx)
+    }
+    ["api", "images"], Get -> image(ctx, req, include_body)
+    ["api", "profiles"], Get -> {
+      use host, cx <- with_codex(ctx, req, None)
+      list_profiles(host, cx)
+    }
+    ["api", "threads", id, "profile"], Get -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      get_profile(ctx, host, cx, id)
+    }
+    ["api", "threads", id, "profile"], Post -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      post_profile(ctx, host, cx, req, id)
+    }
+    ["api", "threads"], Get -> list_threads(ctx, req)
     ["api", "threads"], Post -> create_thread(ctx, req)
     ["api", "threads", "loaded"], Get -> loaded_threads(ctx)
-    ["api", "threads", id], Get -> read_thread(ctx, id)
-    ["api", "threads", id, "open"], Post -> open_thread(ctx, req, id)
-    ["api", "threads", id, "files"], Get -> list_files(ctx, req, id)
-    ["api", "threads", id, "file"], Get -> read_file(ctx, req, id)
-    ["api", "threads", id, "git", "changes"], Get -> git_changes(ctx, req, id)
-    ["api", "threads", id, "git", "diff"], Get -> git_diff(ctx, req, id)
-    ["api", "threads", id, "message"], Post -> message(ctx, req, id)
-    ["api", "threads", id, "interrupt"], Post -> interrupt(ctx, req, id)
-    ["api", "threads", id, "goal"], Get -> get_goal(ctx, id)
-    ["api", "threads", id, "goal"], Post -> post_goal(ctx, req, id)
-    ["api", "threads", id, "model"], Get -> get_model(ctx, id)
-    ["api", "threads", id, "model"], Post -> post_model(ctx, req, id)
-    ["api", "threads", id, "fast"], Post -> post_fast(ctx, req, id)
-    ["api", "threads", id, "compact"], Post ->
-      simple_rpc(ctx, "thread/compact/start", id)
-    ["api", "threads", id, "review"], Post -> review(ctx, req, id)
-    ["api", "threads", id, "shell"], Post -> shell(ctx, req, id)
-    ["api", "threads", id, "rollback"], Post -> rollback(ctx, req, id)
-    ["api", "threads", id, "fork"], Post -> fork(ctx, req, id)
-    ["api", "threads", id, "archive"], Post ->
-      simple_rpc(ctx, "thread/archive", id)
-    ["api", "threads", id, "unsubscribe"], Post ->
-      simple_rpc(ctx, "thread/unsubscribe", id)
-    ["api", "threads", id, "unarchive"], Post ->
-      simple_rpc(ctx, "thread/unarchive", id)
+    ["api", "threads", id], Get -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      read_thread(cx, id)
+    }
+    ["api", "threads", id, "open"], Post -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      open_thread(ctx, host, cx, req, id)
+    }
+    ["api", "threads", id, "files"], Get -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      list_files(host, cx, req, id)
+    }
+    ["api", "threads", id, "file"], Get -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      read_file(host, cx, req, id)
+    }
+    ["api", "threads", id, "git", "changes"], Get -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      git_changes(host, cx, req, id)
+    }
+    ["api", "threads", id, "git", "diff"], Get -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      git_diff(host, cx, req, id)
+    }
+    ["api", "threads", id, "message"], Post -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      message(ctx, host, cx, req, id)
+    }
+    ["api", "threads", id, "interrupt"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      interrupt(cx, req, id)
+    }
+    ["api", "threads", id, "goal"], Get -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      get_goal(cx, id)
+    }
+    ["api", "threads", id, "goal"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      post_goal(cx, req, id)
+    }
+    ["api", "threads", id, "model"], Get -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      get_model(ctx, host, cx, id)
+    }
+    ["api", "threads", id, "model"], Post -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      post_model(ctx, host, cx, req, id)
+    }
+    ["api", "threads", id, "fast"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      post_fast(cx, req, id)
+    }
+    ["api", "threads", id, "compact"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      simple_rpc(cx, "thread/compact/start", id)
+    }
+    ["api", "threads", id, "review"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      review(cx, req, id)
+    }
+    ["api", "threads", id, "shell"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      shell(cx, req, id)
+    }
+    ["api", "threads", id, "rollback"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      rollback(cx, req, id)
+    }
+    ["api", "threads", id, "fork"], Post -> {
+      use host, cx <- with_codex(ctx, req, Some(id))
+      fork(ctx, host, cx, req, id)
+    }
+    ["api", "threads", id, "archive"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      simple_rpc(cx, "thread/archive", id)
+    }
+    ["api", "threads", id, "unsubscribe"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      simple_rpc(cx, "thread/unsubscribe", id)
+    }
+    ["api", "threads", id, "unarchive"], Post -> {
+      use _, cx <- with_codex(ctx, req, Some(id))
+      simple_rpc(cx, "thread/unarchive", id)
+    }
     ["api", ..], _ -> json_response(404, error_body("not found"))
     _, Get -> static_files.serve(ctx.static_dir, req.path, include_body)
     _, _ -> text_response(404, "not found")
   }
+}
+
+// -- Host routing -------------------------------------------------------------
+
+/// The `?host=` hint: which host's codex a request addresses. Absent for
+/// thread-scoped calls once the thread has been seen (the registry's routing
+/// map takes over), required to address a not-yet-connected remote host.
+fn host_hint(req: Request(Connection)) -> Option(String) {
+  request.get_query(req)
+  |> result.unwrap([])
+  |> list.key_find("host")
+  |> result.try(fn(host) {
+    case host {
+      "" -> Error(Nil)
+      _ -> Ok(host)
+    }
+  })
+  |> option.from_result
+}
+
+/// Resolve the manager for a request and run `handler` with it.
+fn with_codex(
+  ctx: Context,
+  req: Request(Connection),
+  thread_id: Option(String),
+  handler: fn(String, Codex) -> Response(ResponseData),
+) -> Response(ResponseData) {
+  case hosts.resolve(ctx.registry, host_hint(req), thread_id) {
+    Ok(#(host, cx)) -> handler(host, cx)
+    Error(message) -> json_response(400, error_body(message))
+  }
+}
+
+/// GET /api/hosts: local plus every concrete ~/.ssh/config alias, with the
+/// connection state of any manager already running. Never connects anything.
+fn list_hosts(ctx: Context) -> Response(ResponseData) {
+  let running = hosts.running(ctx.registry)
+  let entries =
+    [hosts.local, ..ssh_config.discover()]
+    |> list.unique
+    |> list.map(fn(host) {
+      let #(state, error) = case list.key_find(running, host) {
+        Ok(cx) -> {
+          let info = codex.info(cx)
+          #(info.state, info.error)
+        }
+        Error(_) -> #("disconnected", "")
+      }
+      json.object([
+        #("name", json.string(host)),
+        #("kind", case host == hosts.local {
+          True -> json.string("local")
+          False -> json.string("remote")
+        }),
+        #("state", case host == hosts.local {
+          // The local child is spawned on demand; it is never unreachable.
+          True -> json.string("connected")
+          False -> json.string(state)
+        }),
+        #("error", case error {
+          "" -> json.null()
+          _ -> json.string(error)
+        }),
+      ])
+    })
+  json_response(
+    200,
+    json.object([#("hosts", json.preprocessed_array(entries))]),
+  )
 }
 
 // -- Small helpers ------------------------------------------------------------
@@ -478,19 +623,19 @@ fn read_json_body(req: Request(Connection)) -> Dynamic {
 
 /// Perform a codex request and pass its result JSON through, mapping errors
 /// to a 500 response.
-fn rpc(ctx: Context, method: String, params: Json) -> Response(ResponseData) {
-  case codex.request(ctx.codex, method, params) {
+fn rpc(cx: Codex, method: String, params: Json) -> Response(ResponseData) {
+  case codex.request(cx, method, params) {
     Ok(result) -> json_response(200, jsonx.to_json(result))
     Error(message) -> json_response(500, error_body(message))
   }
 }
 
 fn simple_rpc(
-  ctx: Context,
+  cx: Codex,
   method: String,
   thread_id: String,
 ) -> Response(ResponseData) {
-  rpc(ctx, method, json.object([#("threadId", json.string(thread_id))]))
+  rpc(cx, method, json.object([#("threadId", json.string(thread_id))]))
 }
 
 // -- /api/events --------------------------------------------------------------
@@ -506,7 +651,7 @@ fn sse(ctx: Context, req: Request(Connection)) -> Response(ResponseData) {
     response.new(200),
     fn(subject) {
       process.send(subject, "{\"method\":\"yacwu/connected\",\"params\":{}}")
-      codex.subscribe(ctx.codex, process.self(), subject)
+      hosts.subscribe_all(ctx.registry, process.self(), subject)
       let _ = process.send_after(subject, 15_000, ping)
       subject
     },
@@ -518,6 +663,9 @@ fn sse(ctx: Context, req: Request(Connection)) -> Response(ResponseData) {
             |> mist.event_name("ping")
           case mist.send_event(conn, event) {
             Ok(_) -> {
+              // Re-subscribing is idempotent and heals the stream if the
+              // host registry restarted since the last tick.
+              hosts.subscribe_all(ctx.registry, process.self(), subject)
               let _ = process.send_after(subject, 15_000, ping)
               actor.continue(subject)
             }
@@ -542,15 +690,14 @@ fn sse(ctx: Context, req: Request(Connection)) -> Response(ResponseData) {
 // -- /api/account -------------------------------------------------------------
 
 /// Account + rate-limit info backing the /status command.
-fn account(ctx: Context) -> Response(ResponseData) {
+fn account(cx: Codex) -> Response(ResponseData) {
   let account =
     codex.request(
-      ctx.codex,
+      cx,
       "account/read",
       json.object([#("refreshToken", json.bool(False))]),
     )
-  let rate =
-    codex.request(ctx.codex, "account/rateLimits/read", json.object([]))
+  let rate = codex.request(cx, "account/rateLimits/read", json.object([]))
   let pick = fn(result: Result(Dynamic, String), field: String) -> Json {
     case result {
       Ok(value) ->
@@ -596,6 +743,7 @@ fn extension_of(path: String) -> String {
 }
 
 fn image(
+  ctx: Context,
   req: Request(Connection),
   include_body: Bool,
 ) -> Response(ResponseData) {
@@ -611,33 +759,40 @@ fn image(
         json.object([#("message", json.string("absolute image path required"))]),
       )
     True ->
+      case list.key_find(image_mime, extension_of(path)) {
+        Error(_) ->
+          json_response(
+            415,
+            json.object([#("message", json.string("unsupported image type"))]),
+          )
+        Ok(mime) ->
+          case hosts.resolve(ctx.registry, host_hint(req), None) {
+            Error(message) -> json_response(400, error_body(message))
+            Ok(#(host, cx)) -> serve_image(host, cx, path, mime, include_body)
+          }
+      }
+  }
+}
+
+fn serve_image(
+  host: String,
+  cx: Codex,
+  path: String,
+  mime: String,
+  include_body: Bool,
+) -> Response(ResponseData) {
+  // The local fast path streams straight from disk; remote images arrive
+  // through the link (size-capped) and are served buffered.
+  case host == hosts.local, include_body {
+    True, True ->
       case simplifile.is_file(path) {
         Ok(True) ->
-          case list.key_find(image_mime, extension_of(path)) {
-            Ok(mime) ->
-              case
-                case include_body {
-                  True -> mist.send_file(path, offset: 0, limit: None)
-                  False -> Ok(mist.Bytes(bytes_tree.new()))
-                }
-              {
-                Ok(body) ->
-                  response.new(200)
-                  |> response.set_header("content-type", mime)
-                  |> response.set_header("cache-control", "no-store")
-                  |> response.set_body(body)
-                Error(_) ->
-                  json_response(
-                    404,
-                    json.object([#("message", json.string("image not found"))]),
-                  )
-              }
+          case mist.send_file(path, offset: 0, limit: None) {
+            Ok(body) -> image_response(mime, body)
             Error(_) ->
               json_response(
-                415,
-                json.object([
-                  #("message", json.string("unsupported image type")),
-                ]),
+                404,
+                json.object([#("message", json.string("image not found"))]),
               )
           }
         _ ->
@@ -646,16 +801,38 @@ fn image(
             json.object([#("message", json.string("image not found"))]),
           )
       }
+    _, _ ->
+      case
+        workspace.read_binary(ws_for(host, cx), path, workspace.max_image_bytes)
+      {
+        Error(message) ->
+          json_response(404, json.object([#("message", json.string(message))]))
+        Ok(bits) ->
+          image_response(mime, case include_body {
+            True -> mist.Bytes(bytes_tree.from_bit_array(bits))
+            False -> mist.Bytes(bytes_tree.new())
+          })
+      }
   }
+}
+
+fn image_response(
+  mime: String,
+  body: mist.ResponseData,
+) -> Response(ResponseData) {
+  response.new(200)
+  |> response.set_header("content-type", mime)
+  |> response.set_header("cache-control", "no-store")
+  |> response.set_body(body)
 }
 
 // -- /api/threads/[id]/files and /api/threads/[id]/file -----------------------
 
 /// The session's working directory, which roots all file browsing.
-fn thread_root(ctx: Context, thread_id: String) -> Result(String, String) {
+fn thread_root(cx: Codex, thread_id: String) -> Result(String, String) {
   case
     codex.request(
-      ctx.codex,
+      cx,
       "thread/read",
       json.object([
         #("threadId", json.string(thread_id)),
@@ -682,17 +859,20 @@ fn query_rel_path(req: Request(Connection)) -> Result(String, Nil) {
 }
 
 fn list_files(
-  ctx: Context,
+  host: String,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
   case query_rel_path(req) {
     Error(_) -> json_response(400, error_body("invalid path"))
     Ok(rel) ->
-      case thread_root(ctx, thread_id) {
+      case thread_root(cx, thread_id) {
         Error(message) -> json_response(500, error_body(message))
         Ok(root) ->
-          case files.list_directory(files.resolve(root, rel)) {
+          case
+            workspace.list_directory(ws_for(host, cx), files.resolve(root, rel))
+          {
             Error(message) -> json_response(404, error_body(message))
             Ok(entries) ->
               json_response(
@@ -709,7 +889,8 @@ fn list_files(
 }
 
 fn read_file(
-  ctx: Context,
+  host: String,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
@@ -717,32 +898,42 @@ fn read_file(
     Error(_) -> json_response(400, error_body("invalid path"))
     Ok("") -> json_response(400, error_body("file path is required"))
     Ok(rel) ->
-      case thread_root(ctx, thread_id) {
+      case thread_root(cx, thread_id) {
         Error(message) -> json_response(500, error_body(message))
         Ok(root) -> {
           let meta = fn(size: Int) {
             [#("path", json.string(rel)), #("size", json.int(size))]
           }
-          case files.read_file(files.resolve(root, rel)) {
-            files.Text(size, content) ->
-              json_response(
-                200,
-                json.object([#("content", json.string(content)), ..meta(size)]),
-              )
-            files.Binary(size) ->
-              json_response(
-                200,
-                json.object([#("binary", json.bool(True)), ..meta(size)]),
-              )
-            files.TooLarge(size) ->
-              json_response(
-                200,
-                json.object([#("tooLarge", json.bool(True)), ..meta(size)]),
-              )
-            files.Missing -> json_response(404, error_body("file not found"))
+          case workspace.read_file(ws_for(host, cx), files.resolve(root, rel)) {
+            Error(message) -> json_response(500, error_body(message))
+            Ok(content) -> render_file_content(content, meta)
           }
         }
       }
+  }
+}
+
+fn render_file_content(
+  content: files.FileContent,
+  meta: fn(Int) -> List(#(String, Json)),
+) -> Response(ResponseData) {
+  case content {
+    files.Text(size, content) ->
+      json_response(
+        200,
+        json.object([#("content", json.string(content)), ..meta(size)]),
+      )
+    files.Binary(size) ->
+      json_response(
+        200,
+        json.object([#("binary", json.bool(True)), ..meta(size)]),
+      )
+    files.TooLarge(size) ->
+      json_response(
+        200,
+        json.object([#("tooLarge", json.bool(True)), ..meta(size)]),
+      )
+    files.Missing -> json_response(404, error_body("file not found"))
   }
 }
 
@@ -760,15 +951,16 @@ fn git_scope(req: Request(Connection)) -> Result(git.Scope, Nil) {
 }
 
 fn git_changes(
-  ctx: Context,
+  host: String,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
-  case git_scope(req), thread_root(ctx, thread_id) {
+  case git_scope(req), thread_root(cx, thread_id) {
     Error(_), _ -> json_response(400, error_body("invalid diff scope"))
     _, Error(message) -> json_response(500, error_body(message))
     Ok(scope), Ok(root) ->
-      case git.changes_json(root, scope) {
+      case git.changes_json(repo_for(host, cx, root), scope) {
         Ok(body) -> json_response(200, body)
         Error(message) -> json_response(500, error_body(message))
       }
@@ -776,32 +968,125 @@ fn git_changes(
 }
 
 fn git_diff(
-  ctx: Context,
+  host: String,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
   let raw_path = query_value(req, "path")
-  case git_scope(req), files.sanitize(raw_path), thread_root(ctx, thread_id) {
+  case git_scope(req), files.sanitize(raw_path), thread_root(cx, thread_id) {
     Error(_), _, _ -> json_response(400, error_body("invalid diff scope"))
     _, Error(_), _ -> json_response(400, error_body("invalid path"))
     _, Ok(""), _ -> json_response(400, error_body("file path is required"))
     _, _, Error(message) -> json_response(500, error_body(message))
     Ok(scope), Ok(path), Ok(root) ->
-      case git.diff_json(root, scope, path) {
+      case git.diff_json(repo_for(host, cx, root), scope, path) {
         Ok(body) -> json_response(200, body)
         Error(message) -> json_response(500, error_body(message))
       }
   }
 }
 
+/// The workspace a session's files live in: this machine, or the remote
+/// machine reached through the session's app-server.
+fn ws_for(host: String, cx: Codex) -> workspace.Workspace {
+  case host == hosts.local {
+    True -> workspace.LocalWorkspace
+    False -> workspace.RemoteWorkspace(cx)
+  }
+}
+
+/// The session's Git repository, executed locally or via the remote
+/// app-server's `command/exec`.
+fn repo_for(host: String, cx: Codex, root: String) -> git.Repo {
+  case host == hosts.local {
+    True -> git.local_repo(root)
+    False ->
+      git.Repo(
+        exec: workspace.exec_git(cx, root, _),
+        read_file: fn(rel) {
+          workspace.read_file(
+            workspace.RemoteWorkspace(cx),
+            files.resolve(root, rel),
+          )
+          |> result.unwrap(files.Missing)
+        },
+        cwd: root,
+      )
+  }
+}
+
+/// Rollouts live beside the session's codex: read them locally, or over the
+/// link (size-capped) for remote sessions.
+fn rollout_reader(
+  host: String,
+  cx: Codex,
+) -> fn(String) -> Result(model_state.Persisted, Nil) {
+  case host == hosts.local {
+    True -> model_state.read_latest_turn_model
+    False -> fn(path) {
+      workspace.read_binary(workspace.RemoteWorkspace(cx), path, 4_000_000)
+      |> result.replace_error(Nil)
+      |> result.try(fn(bits) {
+        bit_array.to_string(bits) |> result.replace_error(Nil)
+      })
+      |> result.try(model_state.parse_latest_turn_model)
+    }
+  }
+}
+
+/// The codex home holding a host's profile files.
+fn host_codex_home(host: String, cx: Codex) -> String {
+  case host == hosts.local {
+    True -> profiles.codex_home()
+    False -> codex.info(cx).codex_home
+  }
+}
+
+/// A host's available profiles ($CODEX_HOME/<name>.config.toml on the
+/// machine the session runs on).
+fn host_profiles(host: String, cx: Codex) -> List(profiles.Profile) {
+  case host == hosts.local {
+    True -> profiles.list_profiles()
+    False -> {
+      let home = host_codex_home(host, cx)
+      case home {
+        "" -> []
+        _ -> {
+          let ws = workspace.RemoteWorkspace(cx)
+          case workspace.list_directory(ws, home) {
+            Error(_) -> []
+            Ok(entries) ->
+              entries
+              |> list.filter_map(fn(entry) {
+                profiles.profile_file_name(entry.name)
+              })
+              |> list.sort(string.compare)
+              |> list.filter_map(fn(name) {
+                case
+                  workspace.read_file(ws, home <> "/" <> name <> ".config.toml")
+                {
+                  Ok(files.Text(_, content)) ->
+                    profiles.parse_profile(name, content)
+                  _ -> Error(Nil)
+                }
+              })
+          }
+        }
+      }
+    }
+  }
+}
+
 // -- /api/profiles and /api/threads/[id]/profile ------------------------------
 
-/// Available codex profiles ($CODEX_HOME/<name>.config.toml files).
-fn list_profiles() -> Response(ResponseData) {
+/// Available codex profiles ($CODEX_HOME/<name>.config.toml files on the
+/// requested host).
+fn list_profiles(host: String, cx: Codex) -> Response(ResponseData) {
   json_response(
     200,
     json.object([
-      #("profiles", profiles.profiles_to_json(profiles.list_profiles())),
+      #("profiles", profiles.profiles_to_json(host_profiles(host, cx))),
     ]),
   )
 }
@@ -814,14 +1099,12 @@ fn resolve_profile(
   ctx: Context,
   thread_id: String,
   available: List(profiles.Profile),
-  rollout_path: Result(String, Nil),
+  persisted_model: fn() -> Result(String, Nil),
 ) -> Result(profiles.Profile, Nil) {
   case profiles.get_selection(ctx.profile_store, thread_id) {
     Ok(name) -> profiles.find(available, name)
     Error(_) -> {
-      use path <- result.try(rollout_path)
-      use persisted <- result.try(model_state.read_latest_turn_model(path))
-      use model <- result.try(option.to_result(persisted.model, Nil))
+      use model <- result.try(persisted_model())
       use profile <- result.try(profiles.infer_for_model(available, model))
       profiles.set_selection(ctx.profile_store, thread_id, Some(profile.name))
       Ok(profile)
@@ -829,11 +1112,25 @@ fn resolve_profile(
   }
 }
 
+/// Lazy "which model did this session last persist" lookup for profile
+/// inference, reading the rollout on the session's own machine.
+fn persisted_model_via(
+  host: String,
+  cx: Codex,
+  rollout_path: fn() -> Result(String, Nil),
+) -> fn() -> Result(String, Nil) {
+  fn() {
+    use path <- result.try(rollout_path())
+    use persisted <- result.try(rollout_reader(host, cx)(path))
+    option.to_result(persisted.model, Nil)
+  }
+}
+
 /// The session's rollout path, for profile inference (absent for threads that
 /// haven't materialized yet).
-fn thread_rollout_path(ctx: Context, thread_id: String) -> Result(String, Nil) {
+fn thread_rollout_path(cx: Codex, thread_id: String) -> Result(String, Nil) {
   codex.request(
-    ctx.codex,
+    cx,
     "thread/read",
     json.object([
       #("threadId", json.string(thread_id)),
@@ -848,16 +1145,18 @@ fn thread_rollout_path(ctx: Context, thread_id: String) -> Result(String, Nil) {
 /// model resolution (empty when the session has no profile).
 fn profile_model_settings(
   ctx: Context,
+  host: String,
+  cx: Codex,
   thread_id: String,
 ) -> model_state.Persisted {
-  case
+  let resolved =
     resolve_profile(
       ctx,
       thread_id,
-      profiles.list_profiles(),
-      thread_rollout_path(ctx, thread_id),
+      host_profiles(host, cx),
+      persisted_model_via(host, cx, fn() { thread_rollout_path(cx, thread_id) }),
     )
-  {
+  case resolved {
     Ok(profile) ->
       model_state.Persisted(
         model: profile.model,
@@ -881,12 +1180,20 @@ fn profile_state_json(
   ])
 }
 
-fn get_profile(ctx: Context, thread_id: String) -> Response(ResponseData) {
-  let available = profiles.list_profiles()
+fn get_profile(
+  ctx: Context,
+  host: String,
+  cx: Codex,
+  thread_id: String,
+) -> Response(ResponseData) {
+  let available = host_profiles(host, cx)
   let selected =
-    resolve_profile(ctx, thread_id, available, {
-      thread_rollout_path(ctx, thread_id)
-    })
+    resolve_profile(
+      ctx,
+      thread_id,
+      available,
+      persisted_model_via(host, cx, fn() { thread_rollout_path(cx, thread_id) }),
+    )
   json_response(200, profile_state_json(selected, available))
 }
 
@@ -896,11 +1203,13 @@ fn get_profile(ctx: Context, thread_id: String) -> Response(ResponseData) {
 /// persisted on the thread remain until changed.
 fn post_profile(
   ctx: Context,
+  host: String,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
   let body = read_json_body(req)
-  let available = profiles.list_profiles()
+  let available = host_profiles(host, cx)
   let requested =
     jsonx.field_string(body, ["profile"])
     |> result.unwrap("")
@@ -926,7 +1235,7 @@ fn post_profile(
           // turn/start, and the full config layers in on the next open.
           let _ =
             codex.request(
-              ctx.codex,
+              cx,
               "thread/resume",
               json.object([
                 #("threadId", json.string(thread_id)),
@@ -942,44 +1251,158 @@ fn post_profile(
 
 // -- /api/threads -------------------------------------------------------------
 
+fn thread_list_params() -> Json {
+  json.object([
+    #("limit", json.int(100)),
+    #("sortKey", json.string("updated_at")),
+    // Unset (or null) restricts the listing to the *current* provider,
+    // hiding sessions created under profiles with custom providers. An
+    // explicit empty array means "all providers" (per the generated
+    // schema; the prose protocol docs say otherwise).
+    #("modelProviders", json.preprocessed_array([])),
+  ])
+}
+
+/// One host's stored sessions, each entry tagged with the host it lives on.
+/// Successful listings also feed the registry's thread→host routing map.
+fn host_thread_list(
+  ctx: Context,
+  host: String,
+  cx: Codex,
+) -> Result(List(#(Int, Json)), String) {
+  use result <- result.try(codex.request(
+    cx,
+    "thread/list",
+    thread_list_params(),
+  ))
+  let entries =
+    decode.run(result, decode.at(["data"], decode.list(decode.dynamic)))
+    |> result.unwrap([])
+  hosts.record_threads(
+    ctx.registry,
+    host,
+    list.filter_map(entries, jsonx.field_string(_, ["id"])),
+  )
+  Ok(
+    list.map(entries, fn(entry) {
+      let updated =
+        jsonx.field_int(entry, ["updatedAt"])
+        |> result.lazy_or(fn() { jsonx.field_int(entry, ["createdAt"]) })
+        |> result.unwrap(0)
+      #(updated, jsonx.object_with(entry, [#("host", json.string(host))]))
+    }),
+  )
+}
+
 /// List stored codex sessions (newest first), plus the default working dir.
-fn list_threads(ctx: Context) -> Response(ResponseData) {
-  case
-    codex.request(
-      ctx.codex,
-      "thread/list",
-      json.object([
-        #("limit", json.int(100)),
-        #("sortKey", json.string("updated_at")),
-        // Unset (or null) restricts the listing to the *current* provider,
-        // hiding sessions created under profiles with custom providers. An
-        // explicit empty array means "all providers" (per the generated
-        // schema; the prose protocol docs say otherwise).
-        #("modelProviders", json.preprocessed_array([])),
-      ]),
-    )
-  {
-    Ok(result) ->
-      json_response(
-        200,
-        jsonx.object_with(result, [
-          #("defaultCwd", json.string(codex.default_cwd())),
-        ]),
-      )
-    Error(message) -> json_response(500, error_body(message))
+///
+/// With `?host=` the listing addresses that host alone, connecting to it if
+/// needed. Without it, the local sessions merge with those of every remote
+/// host that is currently connected — never *connecting* anything, so the
+/// rail loads fast and unreachable machines cost nothing.
+fn list_threads(
+  ctx: Context,
+  req: Request(Connection),
+) -> Response(ResponseData) {
+  case host_hint(req) {
+    Some(_) -> {
+      use host, cx <- with_codex(ctx, req, None)
+      case host_thread_list(ctx, host, cx) {
+        Error(message) -> json_response(500, error_body(message))
+        Ok(entries) -> {
+          let default_cwd = case host == hosts.local {
+            True -> codex.default_cwd()
+            False -> codex.info(cx).home
+          }
+          json_response(
+            200,
+            json.object([
+              #(
+                "data",
+                json.preprocessed_array(
+                  list.map(sort_by_updated(entries), fn(e) { e.1 }),
+                ),
+              ),
+              #("defaultCwd", json.string(default_cwd)),
+            ]),
+          )
+        }
+      }
+    }
+    None -> {
+      let connected =
+        hosts.running(ctx.registry)
+        |> list.filter(fn(manager) {
+          manager.0 == hosts.local || codex.info(manager.1).state == "connected"
+        })
+      let results =
+        list.map(connected, fn(manager) {
+          #(manager.0, host_thread_list(ctx, manager.0, manager.1))
+        })
+      // A local failure keeps its old visibility; remote hiccups only cost
+      // that host's entries (its state shows in /api/hosts and the stream).
+      let local_error =
+        list.find_map(results, fn(entry) {
+          case entry.0 == hosts.local, entry.1 {
+            True, Error(message) -> Ok(message)
+            _, _ -> Error(Nil)
+          }
+        })
+      case local_error {
+        Ok(message) -> json_response(500, error_body(message))
+        Error(_) -> {
+          let entries =
+            list.flat_map(results, fn(entry) { result.unwrap(entry.1, []) })
+          json_response(
+            200,
+            json.object([
+              #(
+                "data",
+                json.preprocessed_array(
+                  list.map(sort_by_updated(entries), fn(e) { e.1 }),
+                ),
+              ),
+              #("defaultCwd", json.string(codex.default_cwd())),
+            ]),
+          )
+        }
+      }
+    }
   }
+}
+
+fn sort_by_updated(entries: List(#(Int, Json))) -> List(#(Int, Json)) {
+  list.sort(entries, fn(a, b) { int.compare(b.0, a.0) })
 }
 
 /// List thread ids currently loaded in codex memory. Ephemeral side chats
 /// never appear in thread/list, so the UI uses this to re-attach them.
 fn loaded_threads(ctx: Context) -> Response(ResponseData) {
-  rpc(ctx, "thread/loaded/list", json.object([]))
+  let ids =
+    hosts.running(ctx.registry)
+    |> list.filter(fn(manager) {
+      manager.0 == hosts.local || codex.info(manager.1).state == "connected"
+    })
+    |> list.flat_map(fn(manager) {
+      case codex.request(manager.1, "thread/loaded/list", json.object([])) {
+        Ok(result) ->
+          decode.run(result, decode.at(["data"], decode.list(decode.string)))
+          |> result.unwrap([])
+        Error(_) -> []
+      }
+    })
+  json_response(
+    200,
+    json.object([
+      #("data", json.preprocessed_array(list.map(ids, json.string))),
+    ]),
+  )
 }
 
 /// Read one thread's metadata without loading it or including turns.
-fn read_thread(ctx: Context, thread_id: String) -> Response(ResponseData) {
+fn read_thread(cx: Codex, thread_id: String) -> Response(ResponseData) {
   rpc(
-    ctx,
+    cx,
     "thread/read",
     json.object([
       #("threadId", json.string(thread_id)),
@@ -988,20 +1411,38 @@ fn read_thread(ctx: Context, thread_id: String) -> Response(ResponseData) {
   )
 }
 
-/// Create a new thread (session), optionally in a specific working directory.
+/// Create a new thread (session), optionally in a specific working directory
+/// and on a specific host (`host` in the body; default local).
 fn create_thread(
   ctx: Context,
   req: Request(Connection),
 ) -> Response(ResponseData) {
   let body = read_json_body(req)
+  let host_field = case jsonx.field_string(body, ["host"]) {
+    Ok(host) if host != "" -> Some(host)
+    _ -> None
+  }
+  case hosts.resolve(ctx.registry, host_field, None) {
+    Error(message) -> json_response(400, error_body(message))
+    Ok(#(host, cx)) -> create_thread_on(ctx, host, cx, body)
+  }
+}
+
+fn create_thread_on(
+  ctx: Context,
+  host: String,
+  cx: Codex,
+  body: Dynamic,
+) -> Response(ResponseData) {
+  let local = host == hosts.local
   let params = defaults.thread_defaults()
   let params = case jsonx.field_string(body, ["model"]) {
     Ok(model) if model != "" -> [#("model", json.string(model)), ..params]
     _ -> params
   }
 
-  let cwd_params = case jsonx.field_string(body, ["cwd"]) {
-    Ok(cwd) if cwd != "" -> {
+  let cwd_params = case jsonx.field_string(body, ["cwd"]), local {
+    Ok(cwd), True if cwd != "" -> {
       let cwd = resolve_cwd(cwd)
       case directory_status(cwd) {
         DirectoryOk -> Ok([#("cwd", json.string(cwd)), ..params])
@@ -1009,12 +1450,19 @@ fn create_thread(
         DoesNotExist -> Error("Directory does not exist: " <> cwd)
       }
     }
-    _ -> Ok(params)
+    Ok(cwd), False if cwd != "" ->
+      // Remote paths resolve against the remote home; existence is codex's
+      // call — it errors on a bad cwd and that error flows back as-is.
+      Ok([
+        #("cwd", json.string(resolve_cwd_against(cwd, codex.info(cx).home))),
+        ..params
+      ])
+    _, _ -> Ok(params)
   }
 
   let profile = case jsonx.field_string(body, ["profile"]) {
     Ok(name) if name != "" ->
-      case profiles.find(profiles.list_profiles(), string.trim(name)) {
+      case profiles.find(host_profiles(host, cx), string.trim(name)) {
         Ok(profile) -> Ok(Some(profile))
         Error(_) -> Error("unknown profile: " <> string.trim(name))
       }
@@ -1029,20 +1477,29 @@ fn create_thread(
         Some(profile) -> [#("config", profiles.config_json(profile)), ..params]
         None -> params
       }
-      case codex.request(ctx.codex, "thread/start", json.object(params)) {
+      case codex.request(cx, "thread/start", json.object(params)) {
         Error(message) -> json_response(500, error_body(message))
         Ok(result) -> {
-          // Remember the choice for opens/resumes on this server.
-          case profile, jsonx.field_string(result, ["thread", "id"]) {
-            Some(profile), Ok(thread_id) ->
-              profiles.set_selection(
-                ctx.profile_store,
-                thread_id,
-                Some(profile.name),
-              )
-            _, _ -> Nil
+          case jsonx.field_string(result, ["thread", "id"]) {
+            Ok(thread_id) -> {
+              hosts.record_threads(ctx.registry, host, [thread_id])
+              // Remember the choice for opens/resumes on this server.
+              case profile {
+                Some(profile) ->
+                  profiles.set_selection(
+                    ctx.profile_store,
+                    thread_id,
+                    Some(profile.name),
+                  )
+                None -> Nil
+              }
+            }
+            Error(_) -> Nil
           }
-          json_response(200, jsonx.to_json(result))
+          json_response(
+            200,
+            jsonx.object_with(result, [#("host", json.string(host))]),
+          )
         }
       }
     }
@@ -1083,6 +1540,29 @@ fn resolve_cwd(raw: String) -> String {
   }
 }
 
+/// The same resolution against a remote host's home directory. With the home
+/// still unknown (never bootstrapped), relative paths pass through for codex
+/// to reject with its own error.
+fn resolve_cwd_against(raw: String, home: String) -> String {
+  case home {
+    "" -> raw
+    _ -> {
+      let expanded = case raw {
+        "~" -> home
+        _ ->
+          case string.starts_with(raw, "~/") {
+            True -> home <> string.drop_start(raw, 1)
+            False -> raw
+          }
+      }
+      case string.starts_with(expanded, "/") {
+        True -> expanded
+        False -> filepath.join(home, expanded)
+      }
+    }
+  }
+}
+
 // -- /api/threads/[id]/open ---------------------------------------------------
 
 /// Open a session: resume it (loads it into memory + subscribes this
@@ -1095,18 +1575,21 @@ fn resolve_cwd(raw: String) -> String {
 /// drive the same conversation concurrently.
 fn open_thread(
   ctx: Context,
+  host: String,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
   let body = read_json_body(req)
   let force = jsonx.field_bool(body, ["force"]) == Ok(True)
+  hosts.record_threads(ctx.registry, host, [thread_id])
 
   // thread/read returns the rollout path + history WITHOUT loading the
   // thread. A brand-new thread isn't materialized until its first user
   // message, so thread/read can fail — treat that as "no history yet".
   let read =
     codex.request(
-      ctx.codex,
+      cx,
       "thread/read",
       json.object([
         #("threadId", json.string(thread_id)),
@@ -1119,13 +1602,18 @@ fn open_thread(
     Error(_) -> ""
   }
 
-  let holders = case force {
-    True -> []
-    False ->
-      session_lock.detect_external_holders(
-        rollout_path,
-        codex.os_pid(ctx.codex),
-      )
+  // In-use detection: scan for *other* codex processes holding this
+  // session's rollout open — on this machine for local sessions, over ssh
+  // on the session's machine for remote ones.
+  let holders = case force, host == hosts.local {
+    True, _ -> []
+    False, True ->
+      session_lock.detect_external_holders(rollout_path, codex.os_pid(cx))
+    False, False ->
+      remote.detect_holders(host, rollout_path, codex.info(cx).socket)
+      |> list.map(fn(holder) {
+        session_lock.SessionHolder(pid: holder.0, command: holder.1)
+      })
   }
   case holders {
     [_, ..] -> {
@@ -1156,17 +1644,19 @@ fn open_thread(
     }
     [] -> {
       // Layer the session's profile (chosen earlier, or inferred from the
-      // session's model) into the resume. Profiles are re-read from disk on
-      // every open so edits to the files take effect immediately.
+      // session's model) into the resume. Profiles are re-read on every open
+      // so edits to the files take effect immediately.
       let profile =
         resolve_profile(
           ctx,
           thread_id,
-          profiles.list_profiles(),
-          case rollout_path {
-            "" -> Error(Nil)
-            path -> Ok(path)
-          },
+          host_profiles(host, cx),
+          persisted_model_via(host, cx, fn() {
+            case rollout_path {
+              "" -> Error(Nil)
+              path -> Ok(path)
+            }
+          }),
         )
       let resume_params = [
         #("threadId", json.string(thread_id)),
@@ -1180,7 +1670,7 @@ fn open_thread(
         Error(_) -> resume_params
       }
       let resume =
-        codex.request(ctx.codex, "thread/resume", json.object(resume_params))
+        codex.request(cx, "thread/resume", json.object(resume_params))
       case resume {
         Error(message) ->
           case read {
@@ -1317,7 +1807,10 @@ fn image_extension(filename: Option(String), content_type: String) -> String {
   }
 }
 
-fn stage_image(part: Part) -> Result(String, String) {
+/// Stage an uploaded image where the session's codex can read it by path:
+/// a local temp file, or (for remote sessions) an upload directory under the
+/// remote home, written through the app-server.
+fn stage_image(host: String, cx: Codex, part: Part) -> Result(String, String) {
   let display = case part.filename {
     Some(name) if name != "" -> name
     _ -> "upload"
@@ -1326,15 +1819,26 @@ fn stage_image(part: Part) -> Result(String, String) {
   case string.starts_with(content_type, "image/") {
     False -> Error(display <> " is not an image")
     True -> {
-      let tmp = envoy.get("TMPDIR") |> result.unwrap("/tmp")
       let name =
         "yacwu-"
         <> string.lowercase(
           bit_array.base16_encode(crypto.strong_random_bytes(16)),
         )
         <> image_extension(part.filename, content_type)
-      let path = filepath.join(tmp, name)
-      case simplifile.write_bits(path, part.data) {
+      use dir <- result.try(case host == hosts.local {
+        True -> Ok(envoy.get("TMPDIR") |> result.unwrap("/tmp"))
+        False ->
+          case codex.info(cx).home {
+            "" -> Error("remote home directory unknown; reconnect and retry")
+            home -> {
+              let dir = home <> "/.cache/yacwu/uploads"
+              workspace.create_directory(ws_for(host, cx), dir)
+              |> result.replace(dir)
+            }
+          }
+      })
+      let path = filepath.join(dir, name)
+      case workspace.write_file(ws_for(host, cx), path, part.data) {
         Ok(_) -> Ok(path)
         Error(_) -> Error("failed to store " <> display)
       }
@@ -1345,6 +1849,8 @@ fn stage_image(part: Part) -> Result(String, String) {
 /// Send user input, starting a new turn on the thread.
 fn message(
   ctx: Context,
+  host: String,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
@@ -1383,7 +1889,7 @@ fn message(
           part.name == "images" && part.data != <<>>
         })
       list.try_fold(images, [], fn(acc, part) {
-        stage_image(part)
+        stage_image(host, cx, part)
         |> result.map(fn(path) {
           [
             json.object([
@@ -1435,7 +1941,9 @@ fn message(
         Error(_) ->
           case
             profiles.get_selection(ctx.profile_store, thread_id)
-            |> result.try(profiles.find(profiles.list_profiles(), _))
+            |> result.try(fn(name) {
+              profiles.find(host_profiles(host, cx), name)
+            })
           {
             Error(_) -> params
             Ok(profile) -> {
@@ -1454,7 +1962,7 @@ fn message(
             }
           }
       }
-      rpc(ctx, "turn/start", json.object(params))
+      rpc(cx, "turn/start", json.object(params))
     }
   }
 }
@@ -1463,7 +1971,7 @@ fn message(
 
 /// Interrupt the in-flight turn on a thread.
 fn interrupt(
-  ctx: Context,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
@@ -1473,14 +1981,14 @@ fn interrupt(
     Ok(turn_id) -> list.append(params, [#("turnId", jsonx.to_json(turn_id))])
     Error(_) -> params
   }
-  rpc(ctx, "turn/interrupt", json.object(params))
+  rpc(cx, "turn/interrupt", json.object(params))
 }
 
 /// Read a thread's current goal (null if none).
-fn get_goal(ctx: Context, thread_id: String) -> Response(ResponseData) {
+fn get_goal(cx: Codex, thread_id: String) -> Response(ResponseData) {
   case
     codex.request(
-      ctx.codex,
+      cx,
       "thread/goal/get",
       json.object([#("threadId", json.string(thread_id))]),
     )
@@ -1492,13 +2000,13 @@ fn get_goal(ctx: Context, thread_id: String) -> Response(ResponseData) {
 
 /// Set or clear a thread's goal (the same state the TUI's /goal manages).
 fn post_goal(
-  ctx: Context,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
   let body = read_json_body(req)
   case jsonx.field_bool(body, ["clear"]) == Ok(True) {
-    True -> simple_rpc(ctx, "thread/goal/clear", thread_id)
+    True -> simple_rpc(cx, "thread/goal/clear", thread_id)
     False -> {
       let objective =
         jsonx.field_string(body, ["objective"])
@@ -1520,7 +2028,7 @@ fn post_goal(
                 #("status", json.string("active")),
               ]
               case jsonx.field(body, ["tokenBudget"]) {
-                Error(_) -> rpc(ctx, "thread/goal/set", json.object(params))
+                Error(_) -> rpc(cx, "thread/goal/set", json.object(params))
                 Ok(raw) -> {
                   let budget = case jsonx.field_int(body, ["tokenBudget"]) {
                     Ok(budget) -> Ok(budget)
@@ -1532,7 +2040,7 @@ fn post_goal(
                   case budget {
                     Ok(budget) if budget >= 1 ->
                       rpc(
-                        ctx,
+                        cx,
                         "thread/goal/set",
                         json.object(
                           list.append(params, [
@@ -1555,13 +2063,19 @@ fn post_goal(
   }
 }
 
-fn get_model(ctx: Context, thread_id: String) -> Response(ResponseData) {
+fn get_model(
+  ctx: Context,
+  host: String,
+  cx: Codex,
+  thread_id: String,
+) -> Response(ResponseData) {
   case
     model_state.get_thread_model_state(
-      ctx.codex,
+      cx,
       ctx.store,
       thread_id,
-      profile: profile_model_settings(ctx, thread_id),
+      profile: profile_model_settings(ctx, host, cx, thread_id),
+      read_rollout: rollout_reader(host, cx),
     )
   {
     Ok(state) -> json_response(200, model_state.state_to_json(state))
@@ -1571,6 +2085,8 @@ fn get_model(ctx: Context, thread_id: String) -> Response(ResponseData) {
 
 fn post_model(
   ctx: Context,
+  host: String,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
@@ -1596,12 +2112,13 @@ fn post_model(
     _, _ ->
       case
         model_state.set_thread_model_state(
-          ctx.codex,
+          cx,
           ctx.store,
           thread_id,
           model,
           effort,
-          profile: profile_model_settings(ctx, thread_id),
+          profile: profile_model_settings(ctx, host, cx, thread_id),
+          read_rollout: rollout_reader(host, cx),
         )
       {
         Ok(state) -> json_response(200, model_state.state_to_json(state))
@@ -1614,7 +2131,7 @@ fn post_model(
 /// exposes Fast mode as the `priority` service tier; an explicit null restores
 /// standard routing and prevents a model-catalog default from re-enabling it.
 fn post_fast(
-  ctx: Context,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
@@ -1628,7 +2145,7 @@ fn post_fast(
       }
       case
         codex.request(
-          ctx.codex,
+          cx,
           "thread/settings/update",
           json.object([
             #("threadId", json.string(thread_id)),
@@ -1647,7 +2164,7 @@ fn post_fast(
 /// Start a Codex review (the TUI's /review). With no instructions it reviews
 /// the uncommitted changes; with free-form text it runs a custom review.
 fn review(
-  ctx: Context,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
@@ -1665,7 +2182,7 @@ fn review(
       ])
   }
   rpc(
-    ctx,
+    cx,
     "review/start",
     json.object([
       #("threadId", json.string(thread_id)),
@@ -1677,7 +2194,7 @@ fn review(
 
 /// Run a user-initiated shell command attached to the thread.
 fn shell(
-  ctx: Context,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
@@ -1690,7 +2207,7 @@ fn shell(
     "" -> json_response(400, error_body("shell command is required"))
     _ ->
       rpc(
-        ctx,
+        cx,
         "thread/shellCommand",
         json.object([
           #("threadId", json.string(thread_id)),
@@ -1705,6 +2222,8 @@ fn shell(
 /// `developerInstructions` (extra instructions layered onto the fork).
 fn fork(
   ctx: Context,
+  host: String,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
@@ -1724,16 +2243,32 @@ fn fork(
       }
     Error(_) -> extra
   }
-  rpc(
-    ctx,
-    "thread/fork",
-    json.object([#("threadId", json.string(thread_id)), ..extra]),
-  )
+  case
+    codex.request(
+      cx,
+      "thread/fork",
+      json.object([#("threadId", json.string(thread_id)), ..extra]),
+    )
+  {
+    Error(message) -> json_response(500, error_body(message))
+    Ok(result) -> {
+      // The fork lives on the same host as its parent; remember that so
+      // follow-up calls route without a hint.
+      case jsonx.field_string(result, ["thread", "id"]) {
+        Ok(fork_id) -> hosts.record_threads(ctx.registry, host, [fork_id])
+        Error(_) -> Nil
+      }
+      json_response(
+        200,
+        jsonx.object_with(result, [#("host", json.string(host))]),
+      )
+    }
+  }
 }
 
 /// Roll back the last N turns and return the updated thread history.
 fn rollback(
-  ctx: Context,
+  cx: Codex,
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
@@ -1745,7 +2280,7 @@ fn rollback(
   case num_turns {
     Ok(num_turns) if num_turns >= 1 ->
       rpc(
-        ctx,
+        cx,
         "thread/rollback",
         json.object([
           #("threadId", json.string(thread_id)),

@@ -63,7 +63,17 @@ pub fn start(path: String, port: Int) -> Result(Nil, String) {
 
 fn accept_loop(listener: Socket, port: Int) -> Nil {
   case tcp_accept(listener) {
-    Error(_) -> Nil
+    // A transient accept failure (e.g. fd exhaustion) must not silently
+    // kill the unix-socket entrypoint for the rest of the process lifetime;
+    // only a closed listener ends the loop.
+    Error(reason) ->
+      case is_closed(reason) {
+        True -> Nil
+        False -> {
+          process.sleep(100)
+          accept_loop(listener, port)
+        }
+      }
     Ok(client) -> {
       case tcp_connect(#(127, 0, 0, 1), port, [Binary, Active(False)]) {
         Error(_) -> {
@@ -110,4 +120,8 @@ fn pump(from: Socket, to: Socket) -> Nil {
 
 fn is_not_owner(reason: Dynamic) -> Bool {
   decode.run(reason, atom.decoder()) == Ok(atom.create("not_owner"))
+}
+
+fn is_closed(reason: Dynamic) -> Bool {
+  decode.run(reason, atom.decoder()) == Ok(atom.create("closed"))
 }

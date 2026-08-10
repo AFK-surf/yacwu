@@ -26,8 +26,15 @@ state lives entirely in Codex's own persistent sessions, read back via
   lazy unified diffs, and responsive file-to-diff navigation
 - 🎛️ Per-session codex profiles: pick a `$CODEX_HOME/<name>.config.toml` when
   creating a session (or with `/profile`)
-- 🔌 Single `codex app-server` process multiplexed over one connection; events
-  fan out to the browser via Server-Sent Events
+- 🔌 One `codex app-server` connection per machine, multiplexed; events fan
+  out to the browser via Server-Sent Events
+- 🌐 Remote machines over SSH: pick any concrete `Host` alias from
+  `~/.ssh/config` when creating a session. yacwu bootstraps a **persistent**
+  app-server on the remote machine (`--listen unix://` + streamlocal
+  forwarding — no TCP ports), and reconnects with backoff after SSH drops or
+  yacwu restarts while remote turns keep running. Full feature parity: the
+  file browser, Git viewer, images, profiles, and in-use detection all
+  operate on the remote machine. See [docs/remote.md](docs/remote.md)
 - 🗄️ No storage layer — Codex is the source of truth
 
 ## Slash commands

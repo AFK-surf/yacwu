@@ -44,6 +44,7 @@ pub fn parse_numstat_handles_regular_binary_and_rename_records_test() {
 }
 
 pub fn git_runner_inspects_the_project_without_a_shell_test() {
-  git.changes_json("..", git.All) |> should.be_ok
-  git.diff_json("..", git.All, "src/lib/git-diff.ts") |> should.be_ok
+  git.changes_json(git.local_repo(".."), git.All) |> should.be_ok
+  git.diff_json(git.local_repo(".."), git.All, "src/lib/git-diff.ts")
+  |> should.be_ok
 }
