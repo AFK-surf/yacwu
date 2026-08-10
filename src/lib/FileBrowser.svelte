@@ -31,12 +31,14 @@
 		cwd,
 		reveal = null,
 		refreshNonce = 0,
+		onchanges,
 		onclose
 	}: {
 		threadId: string;
 		cwd: string;
 		reveal?: { path: string; line?: number | null; nonce: number } | null;
 		refreshNonce?: number;
+		onchanges: () => void;
 		onclose: () => void;
 	} = $props();
 
@@ -317,10 +319,11 @@
 
 <aside class="file-browser" class:file-open={selectedPath !== null} aria-label="Session files">
 	<header class="fb-header">
-		<div class="fb-heading">
-			<h2>Files</h2>
-			<span class="fb-root" title={root}>{root}</span>
+		<div class="fb-tabs" role="tablist" aria-label="Workspace inspector">
+			<button type="button" role="tab" aria-selected="true">Files</button>
+			<button type="button" role="tab" aria-selected="false" onclick={onchanges}>Changes</button>
 		</div>
+		<span class="fb-root" title={root}>{root}</span>
 		<button
 			type="button"
 			class="fb-icon"
@@ -423,23 +426,31 @@
 		border-block-end: var(--rule-hair) solid var(--color-rule);
 	}
 
-	.fb-heading {
+	.fb-tabs {
 		display: flex;
-		flex: 1;
-		align-items: baseline;
-		gap: var(--space-xs);
-		min-width: 0;
+		gap: var(--space-3xs);
 	}
 
-	.fb-heading h2 {
-		margin: 0;
-		font-family: var(--font-display);
-		font-size: var(--text-md);
-		font-weight: var(--display-weight);
-		letter-spacing: var(--tracking-display);
+	.fb-tabs button {
+		min-height: var(--control-height-compact);
+		padding-inline: var(--space-xs);
+		border: var(--rule-hair) solid transparent;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--color-muted);
+		cursor: pointer;
+		font: inherit;
+		font-size: var(--text-sm);
+	}
+
+	.fb-tabs button[aria-selected='true'] {
+		border-color: var(--color-rule);
+		background: var(--color-paper-3);
+		color: var(--color-ink);
 	}
 
 	.fb-root {
+		flex: 1;
 		min-width: 0;
 		overflow: hidden;
 		color: var(--color-muted);
@@ -683,7 +694,8 @@
 	@media (hover: hover) and (pointer: fine) {
 		.fb-row:hover:not(.other),
 		.fb-icon:hover,
-		.fb-back:hover {
+		.fb-back:hover,
+		.fb-tabs button:hover {
 			background: var(--color-paper-3);
 			color: var(--color-ink);
 		}
@@ -716,7 +728,8 @@
 	@media (pointer: coarse) {
 		.fb-row,
 		.fb-icon,
-		.fb-back {
+		.fb-back,
+		.fb-tabs button {
 			min-height: var(--control-height);
 		}
 	}

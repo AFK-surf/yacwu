@@ -71,7 +71,15 @@ A four-point named scale lives in `tokens.css`. Components use named tokens; raw
 - The file browser is a right-docked inspector drawer on the paper surface; it overlays the transcript and never reflows it. Narrow viewports switch between tree and viewer, file-manager style.
 - The directory tree uses the mono technical register at 13–14 px, directories first, dotfiles in the muted ink. Selection is a paper-3 fill, consistent with the session rail.
 - File contents render in a read-only Monaco viewer themed to the paper palette (`yacwu-paper`): cream background, warm ink, syntax colors held to the muted end of the coral/olive/plum range. The viewer is a bounded technical surface and stays light; charcoal remains reserved for authored fenced code.
-- Transcript file-change paths inside the session working directory are quiet links: ink at rest, coral underline on hover/focus, opening the browser at that file.
+- Workspace file paths in Codex prose are quiet links: ink at rest, coral underline on hover/focus, opening the browser at that file. Operational file-change paths open the Git changes viewer at the current diff.
+
+## Git changes viewer
+
+- Files and Changes share one right-docked workspace-inspector pattern. Changes opens from the session header or a transcript file-change path and shows the repository's current state, rather than replaying a historical tool payload.
+- The changed-file list follows the file tree's compact mono register and selection treatment. All, Staged, and Unstaged scopes compare HEAD, index, and working tree explicitly.
+- Text diffs render exclusively in Monaco's read-only inline diff editor with full original/modified models and syntax highlighting. Deletions and additions share one continuous view at every viewport size; the two-column mode is never used. If Monaco cannot load or complete models are unavailable, the pane shows an explicit error rather than substituting another renderer.
+- The viewer is read-only. It may copy a patch or open the current file, but it does not stage, discard, commit, or edit changes.
+- Narrow viewports switch between the changed-file list and the selected diff using the same file-manager navigation as the file browser.
 
 ## Motion
 

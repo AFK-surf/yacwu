@@ -16,6 +16,7 @@
 	import { parseSlash, SLASH_HELP, filterSlashCommands, type SlashCommandInfo } from '$lib/slash';
 	import { ComposerHistory } from '$lib/history';
 	import FileBrowser from '$lib/FileBrowser.svelte';
+	import GitDiffViewer from '$lib/GitDiffViewer.svelte';
 	import { parseCodexMarkdown, type MarkdownBlock, type MarkdownInline } from '$lib/markdown';
 
 	let { children } = $props();
@@ -108,6 +109,8 @@
 	let filesReveal = $state<{ path: string; line: number | null; nonce: number } | null>(null);
 	let filesRefresh = $state(0);
 	let filesToggleEl = $state<HTMLButtonElement | null>(null);
+	let changesOpen = $state(false);
+	let changesReveal = $state<{ path: string; nonce: number } | null>(null);
 	let sidebarEl = $state<HTMLElement | null>(null);
 	let sidebarToggleEl = $state<HTMLButtonElement | null>(null);
 	let imageInputEl = $state<HTMLInputElement | null>(null);
@@ -375,6 +378,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				// The file browser refreshes what it is showing when the agent
 				// touches files in the viewed session.
 				if (tid === activeId && p.item?.type === 'fileChange') filesRefresh += 1;
+				break;
+			}
+			case 'turn/diff/updated': {
+				if (tid === activeId) filesRefresh += 1;
 				break;
 			}
 			case 'item/agentMessage/delta': {
@@ -1655,8 +1662,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	function toggleFilesPanel() {
-		filesOpen = !filesOpen;
-		if (!filesOpen) filesToggleEl?.focus();
+		if (filesOpen || changesOpen) {
+			filesOpen = false;
+			changesOpen = false;
+			filesToggleEl?.focus();
+		} else {
+			filesOpen = true;
+		}
+	}
+
+	function openFilesPanel() {
+		changesOpen = false;
+		filesOpen = true;
 	}
 
 	function closeFilesPanel() {
@@ -1666,8 +1683,20 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	/** Open the file browser at a session-relative path, optionally on a line. */
 	function openFileInBrowser(rel: string, line: number | null = null) {
+		changesOpen = false;
 		filesOpen = true;
 		filesReveal = { path: rel, line, nonce: ++localCounter };
+	}
+
+	function openChangesPanel(path: string | null = null) {
+		filesOpen = false;
+		changesOpen = true;
+		if (path) changesReveal = { path, nonce: ++localCounter };
+	}
+
+	function closeChangesPanel() {
+		changesOpen = false;
+		filesToggleEl?.focus();
 	}
 
 	/**
@@ -2395,9 +2424,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						type="button"
 						bind:this={filesToggleEl}
 						onclick={toggleFilesPanel}
-						aria-pressed={filesOpen}
-						aria-label={filesOpen ? 'Close file browser' : 'Browse session files'}
-						title={filesOpen ? 'Close file browser' : 'Browse session files'}
+						aria-pressed={filesOpen || changesOpen}
+						aria-label={filesOpen || changesOpen ? 'Close workspace inspector' : 'Open workspace inspector'}
+						title={filesOpen || changesOpen ? 'Close workspace inspector' : 'Files and changes'}
 					>
 						<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
 							<path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z" />
@@ -2439,7 +2468,22 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						cwd={cwds[activeId] ?? activeSummary?.cwd ?? ''}
 						reveal={filesReveal}
 						refreshNonce={filesRefresh}
+						onchanges={() => openChangesPanel()}
 						onclose={closeFilesPanel}
+					/>
+				{/key}
+			{/if}
+
+			{#if changesOpen}
+				{#key activeId}
+					<GitDiffViewer
+						threadId={activeId}
+						cwd={cwds[activeId] ?? activeSummary?.cwd ?? ''}
+						reveal={changesReveal}
+						refreshNonce={filesRefresh}
+						onfiles={openFilesPanel}
+						onviewfile={(path) => openFileInBrowser(path)}
+						onclose={closeChangesPanel}
 					/>
 				{/key}
 			{/if}
@@ -2689,12 +2733,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 											{@const rel = displayFileChangePath(ch)}
 											<div class="fc">
 												<span class="kind {fileChangeClass(ch)}" aria-label={fileChangeKind(ch)} title={fileChangeKind(ch)}>{fileChangeSymbol(ch)}</span>
-												{#if !rel.startsWith('/') && !fileChangeKind(ch).toLowerCase().includes('delete')}
+												{#if !rel.startsWith('/')}
 													<button
 														type="button"
 														class="path path-link"
-														title="Open in file browser"
-														onclick={() => openFileInBrowser(rel)}
+														title="Review current diff"
+														onclick={() => openChangesPanel(rel)}
 													>{rel}</button>
 												{:else}
 													<span class="path">{rel}</span>

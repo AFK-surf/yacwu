@@ -29,6 +29,7 @@ import yacwu/auth
 import yacwu/codex.{type Codex}
 import yacwu/defaults
 import yacwu/files
+import yacwu/git
 import yacwu/jsonx
 import yacwu/model_state.{type Store}
 import yacwu/oauth
@@ -417,6 +418,8 @@ fn dispatch(
     ["api", "threads", id, "open"], Post -> open_thread(ctx, req, id)
     ["api", "threads", id, "files"], Get -> list_files(ctx, req, id)
     ["api", "threads", id, "file"], Get -> read_file(ctx, req, id)
+    ["api", "threads", id, "git", "changes"], Get -> git_changes(ctx, req, id)
+    ["api", "threads", id, "git", "diff"], Get -> git_diff(ctx, req, id)
     ["api", "threads", id, "message"], Post -> message(ctx, req, id)
     ["api", "threads", id, "interrupt"], Post -> interrupt(ctx, req, id)
     ["api", "threads", id, "goal"], Get -> get_goal(ctx, id)
@@ -739,6 +742,54 @@ fn read_file(
             files.Missing -> json_response(404, error_body("file not found"))
           }
         }
+      }
+  }
+}
+
+// -- /api/threads/[id]/git/* -------------------------------------------------
+
+fn query_value(req: Request(Connection), key: String) -> String {
+  request.get_query(req)
+  |> result.unwrap([])
+  |> list.key_find(key)
+  |> result.unwrap("")
+}
+
+fn git_scope(req: Request(Connection)) -> Result(git.Scope, Nil) {
+  git.parse_scope(query_value(req, "scope"))
+}
+
+fn git_changes(
+  ctx: Context,
+  req: Request(Connection),
+  thread_id: String,
+) -> Response(ResponseData) {
+  case git_scope(req), thread_root(ctx, thread_id) {
+    Error(_), _ -> json_response(400, error_body("invalid diff scope"))
+    _, Error(message) -> json_response(500, error_body(message))
+    Ok(scope), Ok(root) ->
+      case git.changes_json(root, scope) {
+        Ok(body) -> json_response(200, body)
+        Error(message) -> json_response(500, error_body(message))
+      }
+  }
+}
+
+fn git_diff(
+  ctx: Context,
+  req: Request(Connection),
+  thread_id: String,
+) -> Response(ResponseData) {
+  let raw_path = query_value(req, "path")
+  case git_scope(req), files.sanitize(raw_path), thread_root(ctx, thread_id) {
+    Error(_), _, _ -> json_response(400, error_body("invalid diff scope"))
+    _, Error(_), _ -> json_response(400, error_body("invalid path"))
+    _, Ok(""), _ -> json_response(400, error_body("file path is required"))
+    _, _, Error(message) -> json_response(500, error_body(message))
+    Ok(scope), Ok(path), Ok(root) ->
+      case git.diff_json(root, scope, path) {
+        Ok(body) -> json_response(200, body)
+        Error(message) -> json_response(500, error_body(message))
       }
   }
 }

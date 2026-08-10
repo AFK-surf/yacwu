@@ -22,6 +22,8 @@ state lives entirely in Codex's own persistent sessions, read back via
 - 📁 Read-only file browser rooted at the session's working directory, with a
   Monaco viewer (lazy-loaded from jsDelivr, never vendored) and clickable
   file-change paths in the transcript
+- ± Read-only Git changes inspector with All, Staged, and Unstaged scopes,
+  lazy unified diffs, and responsive file-to-diff navigation
 - 🎛️ Per-session codex profiles: pick a `$CODEX_HOME/<name>.config.toml` when
   creating a session (or with `/profile`)
 - 🔌 Single `codex app-server` process multiplexed over one connection; events

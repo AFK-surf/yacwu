@@ -506,6 +506,96 @@ test('new session can target a specific working directory', async ({ page }) => 
 	});
 });
 
+test('Git changes viewer filters and renders a responsive Monaco diff', async ({ page }) => {
+	const projectRoot = join(here, '..');
+	const changes = [
+		{
+			path: 'src/routes/+layout.svelte',
+			oldPath: null,
+			status: 'modified',
+			staged: false,
+			unstaged: true,
+			additions: 12,
+			deletions: 3
+		},
+		{
+			path: 'src/lib/GitDiffViewer.svelte',
+			oldPath: null,
+			status: 'added',
+			staged: false,
+			unstaged: true,
+			additions: 280,
+			deletions: 0
+		}
+	];
+
+	await page.route('**/api/threads/*/git/changes?*', async (route) => {
+		const scope = new URL(route.request().url()).searchParams.get('scope') ?? 'all';
+		await route.fulfill({
+			json: {
+				available: true,
+				branch: 'feature/diff-viewer',
+				scope,
+				comparison: scope === 'staged' ? 'HEAD → index' : 'HEAD → working tree',
+				files: scope === 'staged' ? [] : changes
+			}
+		});
+	});
+	await page.route('**/api/threads/*/git/diff?*', async (route) => {
+		const path = new URL(route.request().url()).searchParams.get('path');
+		await route.fulfill({
+			json: {
+				path,
+				binary: false,
+				original: 'before\ncontext\nold value\nafter\n',
+				modified: 'before\ncontext\nnew value\nanother line\nafter\n',
+				patch: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -10,2 +10,3 @@\n context\n-old value\n+new value\n+another line\n`
+			}
+		});
+	});
+
+	await page.goto('/');
+	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
+	await page.locator('button.new').click();
+	await page.locator('.cwd-input').fill(projectRoot);
+	await page.locator('.create button.mini', { hasText: 'Start session' }).click();
+	await expect(page.locator('.composer')).toBeVisible();
+
+	await page.locator('.files-trigger').click();
+	await page.getByRole('tab', { name: 'Changes' }).click();
+	await expect(page.locator('.git-viewer')).toBeVisible();
+	await expect(page.locator('.gv-branch')).toHaveText('feature/diff-viewer');
+	await expect(page.locator('.gv-file')).toHaveCount(2);
+	await expect(page.locator('.gv-file').first().locator('.gv-file-stats')).toContainText('+12');
+	await expect(page.locator('.gv-file').first().locator('.gv-file-stats')).toContainText('−3');
+	await page.locator('.gv-file').first().click();
+	await expect(page.locator('.gv-monaco .monaco-diff-editor, .gv-placeholder.err')).toBeVisible();
+	if (await page.locator('.gv-monaco .monaco-diff-editor').count()) {
+		await expect(page.locator('.gv-diff')).toContainText('old value');
+		await expect(page.locator('.gv-diff')).toContainText('new value');
+	} else {
+		await expect(page.locator('.gv-placeholder.err')).toContainText('Monaco diff viewer could not be loaded');
+	}
+	await expect(page.locator('.gv-stats')).toContainText('+12');
+	await expect(page.locator('.gv-stats')).toContainText('−3');
+
+	await page.getByRole('button', { name: 'Staged', exact: true }).click();
+	await expect(page.locator('.gv-files')).toContainText('No staged changes.');
+	await page.getByRole('button', { name: 'All', exact: true }).click();
+	await expect(page.locator('.gv-file')).toHaveCount(2);
+
+	await page.setViewportSize({ width: 375, height: 780 });
+	await page.locator('.gv-file').first().click();
+	await expect(page.locator('.gv-files')).toBeHidden();
+	await expect(page.locator('.gv-diff')).toBeVisible();
+	await page.locator('.gv-back').click();
+	await expect(page.locator('.gv-files')).toBeVisible();
+	await page.getByRole('tab', { name: 'Files' }).click();
+	await expect(page.locator('.file-browser')).toBeVisible();
+	await page.getByRole('tab', { name: 'Changes' }).click();
+	await expect(page.locator('.git-viewer')).toBeVisible();
+});
+
 test('slash commands: /goal sets, shows, and clears the goal', async ({ page }) => {
 	await page.goto('/');
 	await expect(page.locator('.brand .dot.on')).toBeVisible({ timeout: 15_000 });
