@@ -14,6 +14,7 @@ import mist
 import yacwu/codex
 import yacwu/config
 import yacwu/model_state
+import yacwu/oauth
 import yacwu/profiles
 import yacwu/router
 import yacwu/unix_proxy
@@ -52,6 +53,16 @@ pub fn main() -> Nil {
 }
 
 fn serve(conf: config.Config) -> Nil {
+  // Generate the OAuth cookie-signing secret (when one wasn't provided)
+  // before the first request, so concurrent logins share it.
+  let oauth_enabled = case oauth.load() {
+    Some(_) -> {
+      oauth.ensure_cookie_secret()
+      True
+    }
+    None -> False
+  }
+
   let codex_name = process.new_name("yacwu_codex")
   let store_name = process.new_name("yacwu_models")
   let profile_store_name = process.new_name("yacwu_profiles")
@@ -106,5 +117,9 @@ fn serve(conf: config.Config) -> Nil {
     envoy.get("YACWU_CWD")
     |> result.unwrap("(home)")
   io.println("  working directory for new sessions: " <> cwd_note)
+  case oauth_enabled {
+    True -> io.println("  OAuth login: enabled")
+    False -> Nil
+  }
   process.sleep_forever()
 }

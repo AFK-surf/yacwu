@@ -26,6 +26,7 @@ argv = ">= 1.1.0 and < 2.0.0"
 filepath = ">= 1.1.2 and < 2.0.0"
 gleam_crypto = ">= 1.6.0 and < 2.0.0"
 tom = ">= 2.1.0 and < 3.0.0"
+gleam_httpc = ">= 5.0.0 and < 6.0.0"
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

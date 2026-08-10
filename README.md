@@ -143,11 +143,16 @@ The front-end dev server proxies `/api/*` (including the SSE stream) to the
 backend, so edit Svelte code with hot reload while the Gleam server runs
 unchanged. Set `YACWU_API` to proxy to a backend on a different address.
 
-## Forward auth
+## Authentication
 
-yacwu has no auth of its own; put it behind a reverse proxy that authenticates
-users and injects a `Remote-User` header (Authelia, Traefik forward-auth,
-oauth2-proxy, …). Pass an allowlist to require that header:
+Two mechanisms, usable separately or together. With neither configured the
+server is open — keep it bound to localhost.
+
+### Forward auth
+
+Put yacwu behind a reverse proxy that authenticates users and injects a
+`Remote-User` header (Authelia, Traefik forward-auth, oauth2-proxy, …). Pass
+an allowlist to require that header:
 
 ```bash
 cd server
@@ -157,7 +162,58 @@ gleam run -- --remote-user alice,bob  # or: YACWU_REMOTE_USERS=alice,bob
 When enabled, every request must carry `Remote-User: <user>` matching one of the
 listed users — otherwise it's rejected (`401` if the header is missing, `403` if
 the user isn't allowed). This is enforced for pages, the API, and static assets.
-When unset, auth is disabled.
+When unset, forward auth is disabled.
+
+### Built-in OAuth login
+
+yacwu can also authenticate users itself against an OAuth 2.0 / OpenID Connect
+provider (authorization code flow with PKCE), so no authenticating proxy is
+needed:
+
+```bash
+cd server
+YACWU_OAUTH_ISSUER=https://auth.example.com \
+YACWU_OAUTH_CLIENT_ID=yacwu \
+YACWU_OAUTH_CLIENT_SECRET=... \
+YACWU_OAUTH_USERS=alice,bob \
+gleam run
+```
+
+Register `https://<your-yacwu-host>/oauth/callback` as the redirect URI with
+the provider. Unauthenticated page loads bounce to the provider's login page;
+after the callback the user stays signed in via an HMAC-signed `yacwu_session`
+cookie — stateless, like everything else in the server. API requests without a
+valid session get a plain `401`. `/oauth/logout` signs out.
+
+| variable | meaning |
+| --- | --- |
+| `YACWU_OAUTH_ISSUER` | OIDC issuer; endpoints found via `/.well-known/openid-configuration` |
+| `YACWU_OAUTH_AUTH_URL` / `YACWU_OAUTH_TOKEN_URL` | explicit endpoints (override discovery; both required when no issuer is set) |
+| `YACWU_OAUTH_USERINFO_URL` | userinfo endpoint, used when the provider issues no usable id_token |
+| `YACWU_OAUTH_CLIENT_ID` / `YACWU_OAUTH_CLIENT_SECRET` | client credentials registered with the provider |
+| `YACWU_OAUTH_SCOPES` | requested scopes (default `openid profile email`) |
+| `YACWU_OAUTH_USER_CLAIM` | claim holding the user identity (default: first of `preferred_username`, `email`, `login`, `sub`) |
+| `YACWU_OAUTH_USERS` | comma-separated identity allowlist; empty admits any authenticated user |
+| `YACWU_OAUTH_REDIRECT_URL` | explicit callback URL, when the one derived from `X-Forwarded-Proto` / `X-Forwarded-Host` / `Host` is wrong |
+| `YACWU_OAUTH_COOKIE_SECRET` | cookie-signing secret; auto-generated per process when unset (sessions then survive only until a restart) |
+| `YACWU_OAUTH_SESSION_TTL` | session lifetime in seconds (default `604800`, 7 days) |
+
+Plain OAuth 2.0 providers without OIDC work via explicit endpoints — GitHub,
+for example:
+
+```bash
+YACWU_OAUTH_AUTH_URL=https://github.com/login/oauth/authorize \
+YACWU_OAUTH_TOKEN_URL=https://github.com/login/oauth/access_token \
+YACWU_OAUTH_USERINFO_URL=https://api.github.com/user \
+YACWU_OAUTH_SCOPES=read:user \
+YACWU_OAUTH_CLIENT_ID=... YACWU_OAUTH_CLIENT_SECRET=... \
+YACWU_OAUTH_USERS=octocat \
+gleam run
+```
+
+When both mechanisms are configured, a valid `Remote-User` header or a valid
+session cookie admits the request; anything else is sent through the OAuth
+login.
 
 ## Other commands
 
@@ -182,6 +238,9 @@ browser ──HTTP/SSE──> Gleam server (mist, server/)
 - `server/src/yacwu/router.gleam` — thin REST/SSE endpoints over the protocol
   (`/api/threads`, `/api/threads/[id]/open|message|interrupt`, `/api/events`),
   plus static serving of the built SPA with an `index.html` fallback.
+- `server/src/yacwu/oauth.gleam` — the built-in OAuth/OIDC login: endpoint
+  discovery, PKCE, the code-for-token exchange, and the signed session
+  cookies backing it (no server-side session storage).
 - `server/src/yacwu/session_lock.gleam` — detects whether another codex
   process has a session's rollout file open before we resume it.
 - `server/src/yacwu/model_state.gleam` — per-thread model/effort overrides and
@@ -231,7 +290,7 @@ than blocking.
 
 `--unix <path>` accepts connections on a Unix domain socket and relays them
 byte-for-byte to the HTTP listener bound on a loopback ephemeral port (mist
-itself only speaks TCP). HTTP, SSE, and forward-auth headers pass through
+itself only speaks TCP). HTTP, SSE, and auth headers/cookies pass through
 unchanged.
 
 ## License

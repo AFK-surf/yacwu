@@ -10,6 +10,7 @@ import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/http.{Get, Post}
+import gleam/http/cookie
 import gleam/http/request.{type Request}
 import gleam/http/response.{type Response}
 import gleam/int
@@ -21,6 +22,7 @@ import gleam/otp/actor
 import gleam/result
 import gleam/string
 import gleam/string_tree
+import gleam/uri
 import mist.{type Connection, type ResponseData}
 import simplifile
 import yacwu/auth
@@ -29,6 +31,7 @@ import yacwu/defaults
 import yacwu/files
 import yacwu/jsonx
 import yacwu/model_state.{type Store}
+import yacwu/oauth
 import yacwu/profiles
 import yacwu/session_lock
 import yacwu/static_files
@@ -49,8 +52,8 @@ pub fn handler(
 ) -> fn(Request(Connection)) -> Response(ResponseData) {
   let debug = envoy.get("YACWU_DEBUG") == Ok("1")
   fn(req) {
-    case auth.check_remote_user(request.get_header(req, "remote-user")) {
-      Error(denial) -> text_response(denial.status, denial.message)
+    case gate(req) {
+      Error(resp) -> resp
       Ok(Nil) ->
         case debug {
           False -> route(ctx, req)
@@ -84,6 +87,284 @@ fn erl_monotonic_time(unit: TimeUnit) -> Int
 
 fn monotonic_ms() -> Int {
   erl_monotonic_time(Millisecond)
+}
+
+// -- Authentication gate and /oauth endpoints ---------------------------------
+
+/// Decide whether a request may proceed, or answer it here. Two mechanisms,
+/// usable together:
+///
+/// - forward auth: a `Remote-User` header from an authenticating reverse
+///   proxy, checked against the `YACWU_REMOTE_USERS` allowlist;
+/// - built-in OAuth login: a signed session cookie set by `/oauth/callback`.
+///
+/// A valid session cookie or a valid forward-auth header admits the request.
+/// Otherwise, when OAuth is configured, browsers are sent through the login
+/// flow (API callers get a plain 401); with forward auth alone the original
+/// 401/403 denials apply; with neither configured everything is open.
+fn gate(req: Request(Connection)) -> Result(Nil, Response(ResponseData)) {
+  let oauth_config = oauth.load()
+  case request.path_segments(req), oauth_config {
+    // The login endpoints must be reachable while unauthenticated.
+    ["oauth", "login"], Some(config) -> Error(oauth_login(req, config))
+    ["oauth", "callback"], Some(config) -> Error(oauth_callback(req, config))
+    ["oauth", "logout"], Some(_) -> Error(oauth_logout(req))
+    _, _ -> {
+      let session = case oauth_config {
+        Some(config) ->
+          oauth.session_user(
+            cookie_value(req, oauth.session_cookie),
+            allowed: config.allowed_users,
+            now: oauth.now(),
+            secret: oauth.cookie_secret(),
+          )
+        None -> Error(Nil)
+      }
+      case session {
+        Ok(_user) -> Ok(Nil)
+        Error(_) -> {
+          let forward =
+            auth.check_remote_user(request.get_header(req, "remote-user"))
+          case auth.allowed_remote_users(), forward, oauth_config {
+            [_, ..], Ok(Nil), _ -> Ok(Nil)
+            _, _, Some(_) -> Error(login_required(req))
+            [_, ..], Error(denial), None ->
+              Error(text_response(denial.status, denial.message))
+            [], _, None -> Ok(Nil)
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Unauthenticated while OAuth is configured: page loads bounce into the
+/// login flow (remembering where they were headed); API calls get a 401 —
+/// fetch/EventSource would only choke on a cross-origin redirect.
+fn login_required(req: Request(Connection)) -> Response(ResponseData) {
+  case request.path_segments(req), req.method {
+    ["api", ..], _ -> json_response(401, error_body("authentication required"))
+    _, Get | _, http.Head -> {
+      let next = case req.query {
+        Some(query) -> req.path <> "?" <> query
+        None -> req.path
+      }
+      redirect("/oauth/login?" <> uri.query_to_string([#("next", next)]))
+    }
+    _, _ -> text_response(401, "authentication required")
+  }
+}
+
+/// Start a login: stash state + PKCE verifier + destination in a short-lived
+/// signed cookie and bounce to the provider's authorization endpoint.
+fn oauth_login(
+  req: Request(Connection),
+  config: oauth.Config,
+) -> Response(ResponseData) {
+  case oauth.endpoints(config) {
+    Error(message) ->
+      text_response(502, "OAuth provider unavailable: " <> message)
+    Ok(endpoints) -> {
+      let next =
+        request.get_query(req)
+        |> result.unwrap([])
+        |> list.key_find("next")
+        |> result.unwrap("/")
+        |> oauth.sanitize_next
+      let state = oauth.random_state()
+      let verifier = oauth.random_verifier()
+      let sealed =
+        oauth.seal(
+          [
+            #("state", json.string(state)),
+            #("verifier", json.string(verifier)),
+            #("next", json.string(next)),
+          ],
+          expires_at: oauth.now() + oauth.login_ttl,
+          secret: oauth.cookie_secret(),
+        )
+      oauth.authorize_url(endpoints.auth_url, [
+        #("response_type", "code"),
+        #("client_id", config.client_id),
+        #("redirect_uri", redirect_uri(req, config)),
+        #("scope", config.scopes),
+        #("state", state),
+        #("code_challenge", oauth.pkce_challenge(verifier)),
+        #("code_challenge_method", "S256"),
+      ])
+      |> redirect
+      |> set_auth_cookie(req, oauth.login_cookie, sealed, oauth.login_ttl)
+    }
+  }
+}
+
+/// Finish a login: verify the state cookie, redeem the code (with the PKCE
+/// verifier), resolve the user's identity, enforce the allowlist, and set the
+/// session cookie.
+fn oauth_callback(
+  req: Request(Connection),
+  config: oauth.Config,
+) -> Response(ResponseData) {
+  let query = request.get_query(req) |> result.unwrap([])
+  let param = fn(name) { list.key_find(query, name) |> result.unwrap("") }
+  case param("error") {
+    "" ->
+      case
+        cookie_value(req, oauth.login_cookie)
+        |> result.try(oauth.open(
+          _,
+          now: oauth.now(),
+          secret: oauth.cookie_secret(),
+        ))
+      {
+        Error(_) ->
+          text_response(
+            400,
+            "OAuth login expired or state cookie missing — retry at /oauth/login",
+          )
+        Ok(login) -> {
+          let stored_state =
+            jsonx.field_string(login, ["state"]) |> result.unwrap("")
+          let verifier =
+            jsonx.field_string(login, ["verifier"]) |> result.unwrap("")
+          let next =
+            jsonx.field_string(login, ["next"])
+            |> result.unwrap("/")
+            |> oauth.sanitize_next
+          case
+            param("code"),
+            stored_state != "" && param("state") == stored_state
+          {
+            "", _ -> text_response(400, "missing authorization code")
+            _, False -> text_response(400, "OAuth state mismatch")
+            code, True ->
+              case complete_login(req, config, code, verifier) {
+                Error(#(status, message)) -> text_response(status, message)
+                Ok(user) ->
+                  redirect(next)
+                  |> set_auth_cookie(
+                    req,
+                    oauth.session_cookie,
+                    oauth.seal(
+                      [#("user", json.string(user))],
+                      expires_at: oauth.now() + config.session_ttl,
+                      secret: oauth.cookie_secret(),
+                    ),
+                    config.session_ttl,
+                  )
+                  |> set_auth_cookie(req, oauth.login_cookie, "", 0)
+              }
+          }
+        }
+      }
+    error ->
+      text_response(
+        403,
+        "OAuth provider returned an error: "
+          <> error
+          <> {
+          case param("error_description") {
+            "" -> ""
+            description -> " (" <> description <> ")"
+          }
+        },
+      )
+  }
+}
+
+fn complete_login(
+  req: Request(Connection),
+  config: oauth.Config,
+  code: String,
+  verifier: String,
+) -> Result(String, #(Int, String)) {
+  use endpoints <- result.try(
+    oauth.endpoints(config)
+    |> result.map_error(fn(message) {
+      #(502, "OAuth provider unavailable: " <> message)
+    }),
+  )
+  use tokens <- result.try(
+    oauth.exchange_code(
+      config,
+      endpoints,
+      redirect_uri: redirect_uri(req, config),
+      code: code,
+      verifier: verifier,
+    )
+    |> result.map_error(fn(message) { #(502, message) }),
+  )
+  use user <- result.try(
+    oauth.resolve_identity(config, endpoints, tokens)
+    |> result.map_error(fn(message) { #(502, message) }),
+  )
+  case oauth.user_allowed(user, config.allowed_users) {
+    True -> Ok(user)
+    False -> Error(#(403, "Forbidden: " <> user <> " is not an allowed user"))
+  }
+}
+
+fn oauth_logout(req: Request(Connection)) -> Response(ResponseData) {
+  redirect("/")
+  |> set_auth_cookie(req, oauth.session_cookie, "", 0)
+}
+
+fn cookie_value(req: Request(Connection), name: String) -> Result(String, Nil) {
+  request.get_cookies(req) |> list.key_find(name)
+}
+
+fn redirect(location: String) -> Response(ResponseData) {
+  response.new(302)
+  |> response.set_header("location", location)
+  |> response.set_body(mist.Bytes(bytes_tree.new()))
+}
+
+/// Set (or, with an empty value and zero max-age, clear) one of our HttpOnly
+/// auth cookies, marking it Secure when the client reached us over HTTPS.
+fn set_auth_cookie(
+  resp: Response(ResponseData),
+  req: Request(Connection),
+  name: String,
+  value: String,
+  max_age: Int,
+) -> Response(ResponseData) {
+  response.set_cookie(
+    resp,
+    name,
+    value,
+    cookie.Attributes(
+      ..cookie.defaults(forwarded_scheme(req)),
+      max_age: Some(max_age),
+    ),
+  )
+}
+
+/// The scheme the client used, honouring the reverse proxy's
+/// `X-Forwarded-Proto` (mist itself always terminates plain HTTP).
+fn forwarded_scheme(req: Request(Connection)) -> http.Scheme {
+  case request.get_header(req, "x-forwarded-proto") {
+    Ok("https") -> http.Https
+    _ -> http.Http
+  }
+}
+
+/// The absolute callback URL registered with the provider: explicit
+/// configuration, or derived from the forwarding headers / Host of this
+/// request.
+fn redirect_uri(req: Request(Connection), config: oauth.Config) -> String {
+  case config.redirect_url {
+    Some(url) -> url
+    None -> {
+      let host =
+        request.get_header(req, "x-forwarded-host")
+        |> result.lazy_or(fn() { request.get_header(req, "host") })
+        |> result.unwrap("127.0.0.1")
+      http.scheme_to_string(forwarded_scheme(req))
+      <> "://"
+      <> host
+      <> "/oauth/callback"
+    }
+  }
 }
 
 /// HEAD requests answer like GET — same status and headers, empty body —
