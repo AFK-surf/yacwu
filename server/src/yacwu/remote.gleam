@@ -118,14 +118,23 @@ fn tcp_options(active: Bool) -> List(PortOption) {
 /// so).
 pub const bootstrap_script = "
 export PATH=\"$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"
+if [ -f \"$HOME/.profile\" ]; then . \"$HOME/.profile\" >/dev/null 2>&1 || true; fi
 dir=\"${XDG_CACHE_HOME:-$HOME/.cache}/yacwu\"
 mkdir -p \"$dir\" && chmod 700 \"$dir\" || exit 1
 sock=\"$dir/app-server.sock\"
 pidfile=\"$dir/app-server.pid\"
 log=\"$dir/app-server.log\"
+# Liveness is judged by a running process serving this socket path, not by
+# the recorded pid: npm-style codex installs launch through a wrapper whose
+# pid can die while the real server lives on.
 pid=\"\"
-if [ -f \"$pidfile\" ]; then pid=$(cat \"$pidfile\" 2>/dev/null); fi
-if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null && [ -S \"$sock\" ]; then
+if command -v pgrep >/dev/null 2>&1; then
+  pid=$(pgrep -f \"app-server --listen unix://$sock\" 2>/dev/null | head -n 1)
+elif [ -f \"$pidfile\" ]; then
+  pid=$(cat \"$pidfile\" 2>/dev/null)
+  if [ -n \"$pid\" ] && ! kill -0 \"$pid\" 2>/dev/null; then pid=\"\"; fi
+fi
+if [ -n \"$pid\" ] && [ -S \"$sock\" ]; then
   echo \"YACWU_PID $pid\"
   echo \"YACWU_HOME $HOME\"
   echo \"YACWU_SOCK $sock\"
@@ -134,6 +143,12 @@ fi
 if ! command -v codex >/dev/null 2>&1; then
   echo \"YACWU_ERR codex not found on the remote PATH\"
   exit 1
+fi
+# Half-dead leftovers (a server whose socket file is gone can accept no new
+# connections) must not linger next to the fresh one.
+if command -v pkill >/dev/null 2>&1; then
+  pkill -f \"app-server --listen unix://$sock\" 2>/dev/null || true
+  sleep 1
 fi
 rm -f \"$sock\"
 if command -v setsid >/dev/null 2>&1; then

@@ -77,8 +77,11 @@ sessions).
 ## Requirements on the remote machine
 
 - `codex` on the PATH of a login shell (common user-level locations like
-  `~/.local/bin` are also probed), and logged in — the server uses the
-  *remote* `$CODEX_HOME` credentials.
+  `~/.local/bin` are also probed), and configured — the server uses the
+  *remote* `$CODEX_HOME` config and credentials. The bootstrap sources
+  `~/.profile` before starting the server, so PATH additions and environment
+  the provider needs (API-key variables like a custom provider's `env_key`)
+  belong there.
 - SSH key/agent auth that works non-interactively (`ssh <host>` with no
   prompts). Hosts needing passwords or touch prompts will show a clear error.
 - OpenSSH ≥ 6.7 on both sides (Unix-socket forwarding).
