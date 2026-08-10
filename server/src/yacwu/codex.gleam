@@ -22,6 +22,7 @@
 ////   the remote machine while we are away.
 
 import envoy
+import exception
 import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
@@ -155,28 +156,61 @@ fn local_home() -> String {
 
 /// Send a JSON-RPC request to codex and wait for its response.
 pub fn request(codex: Codex, method: String, params: Json) -> Reply {
-  process.call_forever(process.named_subject(codex), Request(method, params, _))
+  case
+    exception.rescue(fn() {
+      process.call_forever(process.named_subject(codex), Request(
+        method,
+        params,
+        _,
+      ))
+    })
+  {
+    Ok(reply) -> reply
+    Error(_) -> Error("codex manager is restarting; retry shortly")
+  }
 }
 
 /// Send a JSON-RPC notification (no response expected).
 pub fn notify(codex: Codex, method: String, params: Json) -> Nil {
-  process.send(process.named_subject(codex), Notify(method, params))
+  let _ =
+    exception.rescue(fn() {
+      process.send(process.named_subject(codex), Notify(method, params))
+    })
+  Nil
 }
 
 /// Subscribe `subject` to every codex notification, formatted as raw JSON
 /// strings. The subscription is removed automatically when `owner` exits.
 pub fn subscribe(codex: Codex, owner: Pid, subject: Subject(String)) -> Nil {
-  process.send(process.named_subject(codex), Subscribe(owner, subject))
+  let _ =
+    exception.rescue(fn() {
+      process.send(process.named_subject(codex), Subscribe(owner, subject))
+    })
+  Nil
 }
 
 /// OS pid of the managed `codex app-server` process, if it is a local child.
 pub fn os_pid(codex: Codex) -> Result(Int, Nil) {
-  process.call_forever(process.named_subject(codex), GetOsPid)
+  case
+    exception.rescue(fn() {
+      process.call_forever(process.named_subject(codex), GetOsPid)
+    })
+  {
+    Ok(pid) -> pid
+    Error(_) -> Error(Nil)
+  }
 }
 
 /// Connection state, home directory and last error for this host.
 pub fn info(codex: Codex) -> HostInfo {
-  process.call_forever(process.named_subject(codex), GetInfo)
+  case
+    exception.rescue(fn() {
+      process.call_forever(process.named_subject(codex), GetInfo)
+    })
+  {
+    Ok(info) -> info
+    Error(_) -> HostInfo("disconnected", "", "", "", "manager is restarting")
+  }
 }
 
 /// Start a manager registered under `name`. `label` is the host name used in
@@ -249,6 +283,8 @@ type State {
     buffer: BitArray,
     decoder: ws.Decoder,
     forwarder: Option(Port),
+    /// The unlinked connection-setup process, monitored while `Connecting`.
+    connector: Option(Pid),
     /// Threads resumed/started over this manager — re-resumed after a
     /// reconnect so their notifications keep flowing.
     resumed: List(String),
@@ -272,6 +308,7 @@ fn initial_state(self: Codex, label: String, transport: Transport) -> State {
     buffer: <<>>,
     decoder: ws.new_decoder(),
     forwarder: None,
+    connector: None,
     resumed: [],
     home: case transport {
       Ssh(_) -> ""
@@ -322,18 +359,43 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
       actor.continue(state)
     }
     Subscribe(owner, subject) -> {
-      let _ = process.monitor(owner)
-      actor.continue(
-        State(..state, subscribers: [#(owner, subject), ..state.subscribers]),
-      )
+      // Idempotent per owner: subscribers re-subscribe to self-heal after
+      // registry restarts, and monitors must not accumulate.
+      case list.any(state.subscribers, fn(s) { s.0 == owner }) {
+        True ->
+          actor.continue(
+            State(..state, subscribers: [
+              #(owner, subject),
+              ..list.filter(state.subscribers, fn(s) { s.0 != owner })
+            ]),
+          )
+        False -> {
+          let _ = process.monitor(owner)
+          actor.continue(
+            State(..state, subscribers: [#(owner, subject), ..state.subscribers]),
+          )
+        }
+      }
     }
     SubscriberDown(pid) ->
-      actor.continue(
-        State(
-          ..state,
-          subscribers: list.filter(state.subscribers, fn(s) { s.0 != pid }),
-        ),
-      )
+      case state.connector == Some(pid), state.status {
+        // The connection-setup process died without reporting (its 15s call
+        // into this actor timed out, or it crashed): fall into the normal
+        // connect-failed path instead of stranding `Connecting` forever.
+        True, Connecting(_) ->
+          on_conn_result(
+            State(..state, connector: None),
+            Error("connection setup did not complete"),
+          )
+        True, _ -> actor.continue(State(..state, connector: None))
+        False, _ ->
+          actor.continue(
+            State(
+              ..state,
+              subscribers: list.filter(state.subscribers, fn(s) { s.0 != pid }),
+            ),
+          )
+      }
     GetOsPid(reply) -> {
       let pid = case state.status {
         Running(PortConn(port)) | Initializing(PortConn(port), _, _) ->
@@ -471,9 +533,11 @@ fn begin_connect(state: State, queued: List(Queued)) -> actor.Next(State, Msg) {
       actor.continue(begin_initialize(state, PortConn(port), queued))
     }
     UnixSock(_) | Ssh(_) -> {
-      spawn_connector(state)
+      let connector = spawn_connector(state)
       let state = broadcast_status(state, "connecting", "")
-      actor.continue(State(..state, status: Connecting(queued)))
+      actor.continue(
+        State(..state, status: Connecting(queued), connector: Some(connector)),
+      )
     }
   }
 }
@@ -519,31 +583,33 @@ fn spawn_codex() -> Port {
 /// Establish a remote connection off the actor: bootstrap over ssh, ask the
 /// actor to open the socket forward (ports must belong to the long-lived
 /// actor), attach, then hand the socket back via `ConnResult`.
-fn spawn_connector(state: State) -> Nil {
+fn spawn_connector(state: State) -> Pid {
   let subject = process.named_subject(state.self)
   let owner = process.self()
   let transport = state.transport
-  process.spawn_unlinked(fn() {
-    let result = case transport {
-      UnixSock(path) ->
-        remote.attach(path, owner, 10)
-        |> result.map(fn(handover) {
-          #(handover.socket, handover.leftover, None)
-        })
-      Ssh(host) -> {
-        use boot <- result.try(remote.bootstrap(host))
-        let local = remote.local_socket_path(host)
-        use _ <- result.try(
-          process.call(subject, 15_000, OpenForwarder(local, boot.socket, _)),
-        )
-        use handover <- result.try(remote.attach(local, owner, 40))
-        Ok(#(handover.socket, handover.leftover, Some(boot)))
+  let pid =
+    process.spawn_unlinked(fn() {
+      let result = case transport {
+        UnixSock(path) ->
+          remote.attach(path, owner, 10)
+          |> result.map(fn(handover) {
+            #(handover.socket, handover.leftover, None)
+          })
+        Ssh(host) -> {
+          use boot <- result.try(remote.bootstrap(host))
+          let local = remote.local_socket_path(host)
+          use _ <- result.try(
+            process.call(subject, 15_000, OpenForwarder(local, boot.socket, _)),
+          )
+          use handover <- result.try(remote.attach(local, owner, 40))
+          Ok(#(handover.socket, handover.leftover, Some(boot)))
+        }
+        Local -> Error("local transport needs no connector")
       }
-      Local -> Error("local transport needs no connector")
-    }
-    process.send(subject, ConnResult(result))
-  })
-  Nil
+      process.send(subject, ConnResult(result))
+    })
+  let _ = process.monitor(pid)
+  pid
 }
 
 fn on_open_forwarder(
@@ -579,6 +645,7 @@ fn on_conn_result(
   state: State,
   result: Result(#(remote.Socket, BitArray, Option(remote.Bootstrap)), String),
 ) -> actor.Next(State, Msg) {
+  let state = State(..state, connector: None)
   case state.status, result {
     Connecting(queued), Ok(#(socket, leftover, boot)) -> {
       remote.activate(socket)

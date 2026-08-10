@@ -9,6 +9,7 @@
 //// from thread listings and creations (yacwu stores nothing on disk), so
 //// thread-scoped API calls can omit the host once a thread has been seen.
 
+import exception
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Name, type Pid, type Subject}
 import gleam/list
@@ -43,7 +44,18 @@ pub fn resolve(
   hint: Option(String),
   thread: Option(String),
 ) -> Result(#(String, Codex), String) {
-  process.call_forever(process.named_subject(registry), Resolve(hint, thread, _))
+  case
+    exception.rescue(fn() {
+      process.call_forever(process.named_subject(registry), Resolve(
+        hint,
+        thread,
+        _,
+      ))
+    })
+  {
+    Ok(resolved) -> resolved
+    Error(_) -> Error("host registry is restarting; retry shortly")
+  }
 }
 
 /// Remember which host a batch of thread ids lives on.
@@ -52,7 +64,14 @@ pub fn record_threads(
   host: String,
   threads: List(String),
 ) -> Nil {
-  process.send(process.named_subject(registry), RecordThreads(host, threads))
+  let _ =
+    exception.rescue(fn() {
+      process.send(
+        process.named_subject(registry),
+        RecordThreads(host, threads),
+      )
+    })
+  Nil
 }
 
 /// Subscribe to notifications from every manager, current and future (used
@@ -62,17 +81,34 @@ pub fn subscribe_all(
   owner: Pid,
   subject: Subject(String),
 ) -> Nil {
-  process.send(process.named_subject(registry), SubscribeAll(owner, subject))
+  let _ =
+    exception.rescue(fn() {
+      process.send(
+        process.named_subject(registry),
+        SubscribeAll(owner, subject),
+      )
+    })
+  Nil
 }
 
 /// The managers currently running, for cross-host aggregation.
 pub fn running(registry: Registry) -> List(#(String, Codex)) {
-  process.call_forever(process.named_subject(registry), RunningManagers)
+  case
+    exception.rescue(fn() {
+      process.call_forever(process.named_subject(registry), RunningManagers)
+    })
+  {
+    Ok(managers) -> managers
+    Error(_) -> []
+  }
 }
 
 type State {
   State(
     managers: Dict(String, #(Codex, Pid)),
+    /// Process names, minted once per host for the VM's lifetime and reused
+    /// across manager restarts (dynamic name creation leaks atoms).
+    names: Dict(String, Codex),
     threads: Dict(String, String),
     subscribers: List(#(Pid, Subject(String))),
   )
@@ -86,9 +122,17 @@ pub fn supervised(
 
 fn start(name: Registry) -> actor.StartResult(Subject(Msg)) {
   actor.new_with_initialiser(1000, fn(subject) {
+    // Managers are started from this process and therefore linked to it.
+    // Trapping turns a crashing manager's exit signal into a Down message
+    // (prune, restart lazily on next resolve) instead of killing the
+    // registry — and with it every other host's manager. The link still
+    // works in the other direction: if the registry itself dies, all
+    // managers, their ports and sockets are torn down with it.
+    process.trap_exits(True)
     let selector =
       process.new_selector()
       |> process.select(subject)
+      |> process.select_trapped_exits(fn(exit) { Down(exit.pid) })
       |> process.select_monitors(fn(down) {
         case down {
           process.ProcessDown(pid: pid, ..) -> Down(pid)
@@ -96,7 +140,12 @@ fn start(name: Registry) -> actor.StartResult(Subject(Msg)) {
         }
       })
     let state =
-      State(managers: dict.new(), threads: dict.new(), subscribers: [])
+      State(
+        managers: dict.new(),
+        names: dict.new(),
+        threads: dict.new(),
+        subscribers: [],
+      )
     // The local manager always exists.
     let state = case start_manager(state, local) {
       Ok(#(state, _)) -> state
@@ -143,13 +192,20 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
         ),
       )
     SubscribeAll(owner, subject) -> {
-      let _ = process.monitor(owner)
-      dict.each(state.managers, fn(_, manager) {
-        codex.subscribe(manager.0, owner, subject)
-      })
-      actor.continue(
-        State(..state, subscribers: [#(owner, subject), ..state.subscribers]),
-      )
+      // Idempotent: SSE streams re-subscribe on every ping tick so they
+      // self-heal after a registry restart.
+      case list.any(state.subscribers, fn(s) { s.0 == owner }) {
+        True -> actor.continue(state)
+        False -> {
+          let _ = process.monitor(owner)
+          dict.each(state.managers, fn(_, manager) {
+            codex.subscribe(manager.0, owner, subject)
+          })
+          actor.continue(
+            State(..state, subscribers: [#(owner, subject), ..state.subscribers]),
+          )
+        }
+      }
     }
     RunningManagers(reply) -> {
       process.send(
@@ -192,7 +248,13 @@ fn start_manager(
   state: State,
   host: String,
 ) -> Result(#(State, Codex), String) {
-  let name: Codex = process.new_name("yacwu_codex")
+  let #(state, name) = case dict.get(state.names, host) {
+    Ok(name) -> #(state, name)
+    Error(_) -> {
+      let name: Codex = process.new_name("yacwu_codex")
+      #(State(..state, names: dict.insert(state.names, host, name)), name)
+    }
+  }
   let transport = case host == local {
     True -> codex.Local
     False -> codex.Ssh(host)

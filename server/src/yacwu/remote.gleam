@@ -348,6 +348,10 @@ pub fn open_forwarder(
       let _ = simplifile.set_permissions_octal(dir, 0o700)
       // ssh refuses to bind over an existing socket file.
       let _ = simplifile.delete(local)
+      // `ssh -N` never touches stdio, so closing its Erlang port would
+      // orphan the OS process. A local sh watchdog fixes the lifetime: when
+      // the port closes (explicitly, or because the owning manager died),
+      // stdin reaches EOF and the watchdog kills ssh.
       Ok(
         erl_open_port(SpawnExecutable("/usr/bin/env"), [
           Binary,
@@ -356,7 +360,10 @@ pub fn open_forwarder(
           StderrToStdout,
           Hide,
           Args([
-            "ssh",
+            "sh",
+            "-c",
+            "ssh \"$@\" & p=$!; cat >/dev/null; kill \"$p\" 2>/dev/null",
+            "sh",
             "-oBatchMode=yes",
             "-oConnectTimeout=15",
             "-oExitOnForwardFailure=yes",

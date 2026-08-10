@@ -75,12 +75,6 @@ authentication (e.g. bound to localhost only).",
   let registry_name = process.new_name("yacwu_hosts")
   let store_name = process.new_name("yacwu_models")
   let profile_store_name = process.new_name("yacwu_profiles")
-  let assert Ok(_) =
-    supervisor.new(supervisor.OneForOne)
-    |> supervisor.add(hosts.supervised(registry_name))
-    |> supervisor.add(model_state.supervised(store_name))
-    |> supervisor.add(profiles.supervised(profile_store_name))
-    |> supervisor.start
 
   let ctx =
     router.Context(
@@ -91,17 +85,35 @@ authentication (e.g. bound to localhost only).",
       auth: auth_config,
     )
 
+  // Everything lives under one supervision tree, including the HTTP
+  // listener. The default restart tolerance (2 in 5s) is too tight for a
+  // server whose registry fields flaky remote hosts; allow a burst before
+  // giving up.
+  let bound = process.new_subject()
+  let web = case conf.unix {
+    // mist can't bind Unix sockets, so bind loopback on an ephemeral port
+    // and relay the socket's bytes to it.
+    Some(_) ->
+      mist.new(router.handler(ctx))
+      |> mist.bind("127.0.0.1")
+      |> mist.port(0)
+      |> mist.after_start(fn(port, _scheme, _ip) { process.send(bound, port) })
+    None ->
+      mist.new(router.handler(ctx))
+      |> mist.bind(conf.host)
+      |> mist.port(conf.port)
+  }
+  let assert Ok(_) =
+    supervisor.new(supervisor.OneForOne)
+    |> supervisor.restart_tolerance(intensity: 5, period: 30)
+    |> supervisor.add(hosts.supervised(registry_name))
+    |> supervisor.add(model_state.supervised(store_name))
+    |> supervisor.add(profiles.supervised(profile_store_name))
+    |> supervisor.add(mist.supervised(web))
+    |> supervisor.start
+
   let listen = case conf.unix {
     Some(path) -> {
-      // mist can't bind Unix sockets, so bind loopback on an ephemeral port
-      // and relay the socket's bytes to it.
-      let bound = process.new_subject()
-      let assert Ok(_) =
-        mist.new(router.handler(ctx))
-        |> mist.bind("127.0.0.1")
-        |> mist.port(0)
-        |> mist.after_start(fn(port, _scheme, _ip) { process.send(bound, port) })
-        |> mist.start
       let assert Ok(port) = process.receive(bound, 10_000)
       case unix_proxy.start(path, port) {
         Ok(Nil) -> Nil
@@ -112,14 +124,7 @@ authentication (e.g. bound to localhost only).",
       }
       "unix:" <> path
     }
-    None -> {
-      let assert Ok(_) =
-        mist.new(router.handler(ctx))
-        |> mist.bind(conf.host)
-        |> mist.port(conf.port)
-        |> mist.start
-      "http://" <> conf.host <> ":" <> int.to_string(conf.port)
-    }
+    None -> "http://" <> conf.host <> ":" <> int.to_string(conf.port)
   }
 
   io.println("yacwu listening on " <> listen)

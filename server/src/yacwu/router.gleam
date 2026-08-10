@@ -663,6 +663,9 @@ fn sse(ctx: Context, req: Request(Connection)) -> Response(ResponseData) {
             |> mist.event_name("ping")
           case mist.send_event(conn, event) {
             Ok(_) -> {
+              // Re-subscribing is idempotent and heals the stream if the
+              // host registry restarted since the last tick.
+              hosts.subscribe_all(ctx.registry, process.self(), subject)
               let _ = process.send_after(subject, 15_000, ping)
               actor.continue(subject)
             }
