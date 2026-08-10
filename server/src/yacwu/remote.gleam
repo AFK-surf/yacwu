@@ -24,6 +24,7 @@ import envoy
 import gleam/bit_array
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
+import gleam/int
 
 import gleam/erlang/port.{type Port}
 import gleam/erlang/process.{type Pid}
@@ -178,7 +179,7 @@ exit 0
 "
 
 pub type Bootstrap {
-  Bootstrap(pid: String, home: String, socket: String)
+  Bootstrap(pid: String, home: String, codex_home: String, socket: String)
 }
 
 /// Ensure the persistent app-server is running on `host`. Runs the bootstrap
@@ -283,7 +284,11 @@ pub fn parse_bootstrap(
     Ok(message) -> Error(host <> ": " <> message)
     Error(_) ->
       case field("YACWU_PID"), field("YACWU_HOME"), field("YACWU_SOCK") {
-        Ok(pid), Ok(home), Ok(sock) -> Ok(Bootstrap(pid, home, sock))
+        Ok(pid), Ok(home), Ok(sock) -> {
+          let codex_home =
+            field("YACWU_CODEX_HOME") |> result.unwrap(home <> "/.codex")
+          Ok(Bootstrap(pid, home, codex_home, sock))
+        }
         _, _, _ ->
           Error(
             host
@@ -476,4 +481,98 @@ pub fn send_pong(socket: Socket, payload: BitArray) -> Nil {
 pub fn close(socket: Socket) -> Nil {
   let _ = tcp_close(socket)
   Nil
+}
+
+// -- In-use detection ---------------------------------------------------------
+
+/// Scan the remote /proc for processes holding a rollout file open — the
+/// remote equivalent of `session_lock`'s local scan. `$1` is the rollout
+/// path, `$2` the app-server socket path: any holder whose ancestor chain
+/// contains the app-server serving that socket is our own and is skipped.
+/// Non-Linux remotes (no /proc) degrade to "no holders", like the local
+/// unsupported-platform path. No single quotes: travels as data.
+const holders_script = "
+target=\"$1\"
+sockpat=\"$2\"
+[ -d /proc ] || exit 0
+for fd_dir in /proc/[0-9]*/fd; do
+  pid=\"${fd_dir%/fd}\"
+  pid=\"${pid#/proc/}\"
+  match=0
+  for link in \"$fd_dir\"/*; do
+    dest=$(readlink \"$link\" 2>/dev/null) || continue
+    if [ \"$dest\" = \"$target\" ]; then match=1; break; fi
+  done
+  [ \"$match\" = 1 ] || continue
+  p=\"$pid\"
+  skip=0
+  while [ -n \"$p\" ] && [ \"$p\" != 0 ] && [ \"$p\" != 1 ]; do
+    if tr \"\\0\" \" \" < \"/proc/$p/cmdline\" 2>/dev/null | grep -q \"app-server --listen unix://$sockpat\"; then
+      skip=1
+      break
+    fi
+    p=$(sed -n \"s/^PPid:[[:space:]]*//p\" \"/proc/$p/status\" 2>/dev/null)
+  done
+  [ \"$skip\" = 1 ] && continue
+  comm=$(cat \"/proc/$pid/comm\" 2>/dev/null)
+  if [ -z \"$comm\" ]; then comm=\"pid $pid\"; fi
+  echo \"YACWU_HOLDER $pid $comm\"
+done
+exit 0
+"
+
+/// Processes on `host` (other than its yacwu app-server) holding the given
+/// rollout file open. Failures degrade to an empty list — in-use detection
+/// is advisory, never blocking.
+pub fn detect_holders(
+  host: String,
+  rollout_path: String,
+  remote_sock: String,
+) -> List(#(Int, String)) {
+  case rollout_path {
+    "" -> []
+    _ -> {
+      let port =
+        erl_open_port(SpawnExecutable("/usr/bin/env"), [
+          Binary,
+          ExitStatus,
+          UseStdio,
+          StderrToStdout,
+          Hide,
+          Args([
+            "ssh",
+            "-oBatchMode=yes",
+            "-oConnectTimeout=10",
+            "--",
+            host,
+            "exec sh -s "
+              <> shell_quote(rollout_path)
+              <> " "
+              <> shell_quote(remote_sock),
+          ]),
+        ])
+      let _ = erl_port_command(port, bit_array.from_string(holders_script))
+      collect_port_output(port, "", deadline_ms(20_000))
+      |> parse_holders
+    }
+  }
+}
+
+/// Parse `YACWU_HOLDER <pid> <command>` lines.
+pub fn parse_holders(output: String) -> List(#(Int, String)) {
+  string.split(output, "\n")
+  |> list.filter_map(fn(line) {
+    use rest <- result.try(case string.starts_with(line, "YACWU_HOLDER ") {
+      True -> Ok(string.drop_start(line, 13))
+      False -> Error(Nil)
+    })
+    use #(pid, command) <- result.try(string.split_once(rest, " "))
+    use pid <- result.try(int.parse(pid))
+    Ok(#(pid, string.trim(command)))
+  })
+}
+
+/// Single-quote a value for embedding in a remote shell command line.
+fn shell_quote(value: String) -> String {
+  "'" <> string.replace(value, "'", "'\\''") <> "'"
 }

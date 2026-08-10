@@ -34,6 +34,27 @@ pub type LineStats {
   LineStats(additions: Option(Int), deletions: Option(Int))
 }
 
+/// How to reach the repository: an executor for `git <args>` and a reader
+/// for workspace files (untracked content), plus the workdir for the one
+/// place git needs an absolute path. Local sessions run git on this machine;
+/// remote sessions execute through the session's app-server (`command/exec`).
+pub type Repo {
+  Repo(
+    exec: fn(List(String)) -> Result(#(Int, String), String),
+    read_file: fn(String) -> files.FileContent,
+    cwd: String,
+  )
+}
+
+/// A repository on yacwu's own machine.
+pub fn local_repo(cwd: String) -> Repo {
+  Repo(
+    exec: fn(arguments) { run(cwd, arguments) },
+    read_file: fn(path) { files.read_file(filepath.join(cwd, path)) },
+    cwd: cwd,
+  )
+}
+
 @external(erlang, "yacwu_git_port", "run")
 fn run_port(
   cwd: String,
@@ -86,18 +107,19 @@ fn git_arguments(command: List(String)) -> List(String) {
   ]
 }
 
-fn status(cwd: String) -> Result(List(Change), String) {
-  use output <- result.try(run(
-    cwd,
-    git_arguments([
-      "status",
-      "--porcelain=v1",
-      "-z",
-      "--untracked-files=all",
-      "--",
-      ".",
-    ]),
-  ))
+fn status(repo: Repo) -> Result(List(Change), String) {
+  use output <- result.try(
+    repo.exec(
+      git_arguments([
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--",
+        ".",
+      ]),
+    ),
+  )
   case output.0 {
     0 -> Ok(parse_status(output.1))
     _ -> Error(string.trim(output.1))
@@ -193,15 +215,15 @@ fn text_line_count(content: String) -> Int {
   }
 }
 
-fn untracked_stats(cwd: String, change: Change) -> LineStats {
-  case files.read_file(filepath.join(cwd, change.path)) {
+fn untracked_stats(repo: Repo, change: Change) -> LineStats {
+  case repo.read_file(change.path) {
     files.Text(_, content) -> LineStats(Some(text_line_count(content)), Some(0))
     _ -> LineStats(None, None)
   }
 }
 
 fn stats_for(
-  cwd: String,
+  repo: Repo,
   scope: Scope,
   stats: Dict(String, LineStats),
   change: Change,
@@ -209,7 +231,7 @@ fn stats_for(
   case dict.get(stats, change.path) {
     Ok(stats) -> stats
     Error(_) if change.status == "added" && !change.staged && scope != Staged ->
-      untracked_stats(cwd, change)
+      untracked_stats(repo, change)
     Error(_) -> LineStats(Some(0), Some(0))
   }
 }
@@ -275,10 +297,10 @@ fn parse_numstat_records(
 }
 
 fn numstat(
-  cwd: String,
+  repo: Repo,
   scope: Scope,
 ) -> Result(Dict(String, LineStats), String) {
-  case scope == All && !has_head(cwd) {
+  case scope == All && !has_head(repo) {
     True -> Ok(dict.new())
     False -> {
       let arguments = case scope {
@@ -286,7 +308,7 @@ fn numstat(
         Staged -> ["diff", "--numstat", "-z", "--cached", "--", "."]
         Unstaged -> ["diff", "--numstat", "-z", "--", "."]
       }
-      use output <- result.try(run(cwd, git_arguments(arguments)))
+      use output <- result.try(repo.exec(git_arguments(arguments)))
       case output.0 {
         0 -> Ok(parse_numstat(output.1))
         _ -> Error(string.trim(output.1))
@@ -295,24 +317,24 @@ fn numstat(
   }
 }
 
-fn branch(cwd: String) -> String {
-  case run(cwd, git_arguments(["symbolic-ref", "--short", "-q", "HEAD"])) {
+fn branch(repo: Repo) -> String {
+  case repo.exec(git_arguments(["symbolic-ref", "--short", "-q", "HEAD"])) {
     Ok(#(0, name)) -> string.trim(name)
     _ ->
-      case run(cwd, git_arguments(["rev-parse", "--short", "HEAD"])) {
+      case repo.exec(git_arguments(["rev-parse", "--short", "HEAD"])) {
         Ok(#(0, sha)) -> string.trim(sha)
         _ -> "No commits yet"
       }
   }
 }
 
-fn is_work_tree(cwd: String) -> Result(Bool, String) {
-  run(cwd, git_arguments(["rev-parse", "--is-inside-work-tree"]))
+fn is_work_tree(repo: Repo) -> Result(Bool, String) {
+  repo.exec(git_arguments(["rev-parse", "--is-inside-work-tree"]))
   |> result.map(fn(output) { output.0 == 0 && string.trim(output.1) == "true" })
 }
 
-pub fn changes_json(cwd: String, scope: Scope) -> Result(Json, String) {
-  use available <- result.try(is_work_tree(cwd))
+pub fn changes_json(repo: Repo, scope: Scope) -> Result(Json, String) {
+  use available <- result.try(is_work_tree(repo))
   case available {
     False ->
       Ok(
@@ -324,20 +346,20 @@ pub fn changes_json(cwd: String, scope: Scope) -> Result(Json, String) {
         ]),
       )
     True -> {
-      use changes <- result.try(status(cwd))
-      use stats <- result.try(numstat(cwd, scope))
+      use changes <- result.try(status(repo))
+      use stats <- result.try(numstat(repo, scope))
       let visible = list.filter(changes, applies(_, scope))
       Ok(
         json.object([
           #("available", json.bool(True)),
-          #("branch", json.string(branch(cwd))),
+          #("branch", json.string(branch(repo))),
           #("scope", json.string(scope_name(scope))),
           #("comparison", json.string(comparison(scope))),
           #(
             "files",
             json.preprocessed_array(
               list.map(visible, fn(change) {
-                change_json(change, stats_for(cwd, scope, stats, change))
+                change_json(change, stats_for(repo, scope, stats, change))
               }),
             ),
           ),
@@ -347,8 +369,8 @@ pub fn changes_json(cwd: String, scope: Scope) -> Result(Json, String) {
   }
 }
 
-fn has_head(cwd: String) -> Bool {
-  case run(cwd, git_arguments(["rev-parse", "--verify", "HEAD"])) {
+fn has_head(repo: Repo) -> Bool {
+  case repo.exec(git_arguments(["rev-parse", "--verify", "HEAD"])) {
     Ok(#(0, _)) -> True
     _ -> False
   }
@@ -375,12 +397,8 @@ fn diff_arguments(scope: Scope, paths: List(String)) -> List(String) {
   }
 }
 
-fn untracked_patch(
-  cwd: String,
-  path: String,
-) -> Result(#(Int, String), String) {
-  run(
-    cwd,
+fn untracked_patch(repo: Repo, path: String) -> Result(#(Int, String), String) {
+  repo.exec(
     git_arguments([
       "diff",
       "--no-index",
@@ -390,31 +408,31 @@ fn untracked_patch(
       "--unified=3",
       "--",
       "/dev/null",
-      filepath.join(cwd, path),
+      filepath.join(repo.cwd, path),
     ]),
   )
 }
 
-fn repository_path(cwd: String, path: String) -> String {
-  case run(cwd, git_arguments(["rev-parse", "--show-prefix"])) {
+fn repository_path(repo: Repo, path: String) -> String {
+  case repo.exec(git_arguments(["rev-parse", "--show-prefix"])) {
     Ok(#(0, prefix)) -> string.trim(prefix) <> path
     _ -> path
   }
 }
 
-fn blob_text(cwd: String, revision: String, path: String) -> Option(String) {
-  let spec = revision <> ":" <> repository_path(cwd, path)
-  case run(cwd, git_arguments(["show", spec])) {
+fn blob_text(repo: Repo, revision: String, path: String) -> Option(String) {
+  let spec = revision <> ":" <> repository_path(repo, path)
+  case repo.exec(git_arguments(["show", spec])) {
     Ok(#(0, content)) -> Some(content)
     _ -> None
   }
 }
 
-fn working_text(cwd: String, path: String, deleted: Bool) -> Option(String) {
+fn working_text(repo: Repo, path: String, deleted: Bool) -> Option(String) {
   case deleted {
     True -> Some("")
     False ->
-      case files.read_file(filepath.join(cwd, path)) {
+      case repo.read_file(path) {
         files.Text(_, content) -> Some(content)
         _ -> None
       }
@@ -422,7 +440,7 @@ fn working_text(cwd: String, path: String, deleted: Bool) -> Option(String) {
 }
 
 fn diff_contents(
-  cwd: String,
+  repo: Repo,
   scope: Scope,
   change: Option(Change),
   path: String,
@@ -445,33 +463,33 @@ fn diff_contents(
   }
   let original = case scope {
     All | Staged ->
-      case added || !has_head(cwd) {
+      case added || !has_head(repo) {
         True -> Some("")
-        False -> blob_text(cwd, "HEAD", old_path)
+        False -> blob_text(repo, "HEAD", old_path)
       }
     Unstaged ->
       case added && !staged {
         True -> Some("")
-        False -> blob_text(cwd, "", old_path)
+        False -> blob_text(repo, "", old_path)
       }
   }
   let modified = case scope {
-    All | Unstaged -> working_text(cwd, path, deleted)
+    All | Unstaged -> working_text(repo, path, deleted)
     Staged ->
       case deleted {
         True -> Some("")
-        False -> blob_text(cwd, "", path)
+        False -> blob_text(repo, "", path)
       }
   }
   #(original, modified)
 }
 
 pub fn diff_json(
-  cwd: String,
+  repo: Repo,
   scope: Scope,
   path: String,
 ) -> Result(Json, String) {
-  use changes <- result.try(status(cwd))
+  use changes <- result.try(status(repo))
   let selected = find_change(changes, path)
   let paths = case selected {
     Some(Change(old_path: Some(old_path), ..)) -> [path, old_path]
@@ -482,19 +500,19 @@ pub fn diff_json(
       change.status == "added"
       && !change.staged
       && scope != Staged
-      || { !has_head(cwd) && scope == All }
+      || { !has_head(repo) && scope == All }
     None -> False
   }
   let output = case use_no_index {
-    True -> untracked_patch(cwd, path)
-    False -> run(cwd, git_arguments(diff_arguments(scope, paths)))
+    True -> untracked_patch(repo, path)
+    False -> repo.exec(git_arguments(diff_arguments(scope, paths)))
   }
   use output <- result.try(output)
   // git diff --no-index uses 1 to mean "different", not failure.
   case output.0 == 0 || { use_no_index && output.0 == 1 } {
     False -> Error(string.trim(output.1))
     True -> {
-      let contents = diff_contents(cwd, scope, selected, path)
+      let contents = diff_contents(repo, scope, selected, path)
       let binary =
         string.contains(output.1, "Binary files ")
         || string.contains(output.1, "GIT binary patch")

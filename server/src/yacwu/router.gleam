@@ -35,9 +35,11 @@ import yacwu/jsonx
 import yacwu/model_state.{type Store}
 import yacwu/oauth
 import yacwu/profiles
+import yacwu/remote
 import yacwu/session_lock
 import yacwu/ssh_config
 import yacwu/static_files
+import yacwu/workspace
 
 pub type Context {
   Context(
@@ -413,8 +415,11 @@ fn dispatch(
       use _, cx <- with_codex(ctx, req, None)
       account(cx)
     }
-    ["api", "images"], Get -> image(req, include_body)
-    ["api", "profiles"], Get -> list_profiles()
+    ["api", "images"], Get -> image(ctx, req, include_body)
+    ["api", "profiles"], Get -> {
+      use host, cx <- with_codex(ctx, req, None)
+      list_profiles(host, cx)
+    }
     ["api", "threads", id, "profile"], Get -> {
       use host, cx <- with_codex(ctx, req, Some(id))
       get_profile(ctx, host, cx, id)
@@ -735,6 +740,7 @@ fn extension_of(path: String) -> String {
 }
 
 fn image(
+  ctx: Context,
   req: Request(Connection),
   include_body: Bool,
 ) -> Response(ResponseData) {
@@ -750,33 +756,40 @@ fn image(
         json.object([#("message", json.string("absolute image path required"))]),
       )
     True ->
+      case list.key_find(image_mime, extension_of(path)) {
+        Error(_) ->
+          json_response(
+            415,
+            json.object([#("message", json.string("unsupported image type"))]),
+          )
+        Ok(mime) ->
+          case hosts.resolve(ctx.registry, host_hint(req), None) {
+            Error(message) -> json_response(400, error_body(message))
+            Ok(#(host, cx)) -> serve_image(host, cx, path, mime, include_body)
+          }
+      }
+  }
+}
+
+fn serve_image(
+  host: String,
+  cx: Codex,
+  path: String,
+  mime: String,
+  include_body: Bool,
+) -> Response(ResponseData) {
+  // The local fast path streams straight from disk; remote images arrive
+  // through the link (size-capped) and are served buffered.
+  case host == hosts.local, include_body {
+    True, True ->
       case simplifile.is_file(path) {
         Ok(True) ->
-          case list.key_find(image_mime, extension_of(path)) {
-            Ok(mime) ->
-              case
-                case include_body {
-                  True -> mist.send_file(path, offset: 0, limit: None)
-                  False -> Ok(mist.Bytes(bytes_tree.new()))
-                }
-              {
-                Ok(body) ->
-                  response.new(200)
-                  |> response.set_header("content-type", mime)
-                  |> response.set_header("cache-control", "no-store")
-                  |> response.set_body(body)
-                Error(_) ->
-                  json_response(
-                    404,
-                    json.object([#("message", json.string("image not found"))]),
-                  )
-              }
+          case mist.send_file(path, offset: 0, limit: None) {
+            Ok(body) -> image_response(mime, body)
             Error(_) ->
               json_response(
-                415,
-                json.object([
-                  #("message", json.string("unsupported image type")),
-                ]),
+                404,
+                json.object([#("message", json.string("image not found"))]),
               )
           }
         _ ->
@@ -785,7 +798,29 @@ fn image(
             json.object([#("message", json.string("image not found"))]),
           )
       }
+    _, _ ->
+      case
+        workspace.read_binary(ws_for(host, cx), path, workspace.max_image_bytes)
+      {
+        Error(message) ->
+          json_response(404, json.object([#("message", json.string(message))]))
+        Ok(bits) ->
+          image_response(mime, case include_body {
+            True -> mist.Bytes(bytes_tree.from_bit_array(bits))
+            False -> mist.Bytes(bytes_tree.new())
+          })
+      }
   }
+}
+
+fn image_response(
+  mime: String,
+  body: mist.ResponseData,
+) -> Response(ResponseData) {
+  response.new(200)
+  |> response.set_header("content-type", mime)
+  |> response.set_header("cache-control", "no-store")
+  |> response.set_body(body)
 }
 
 // -- /api/threads/[id]/files and /api/threads/[id]/file -----------------------
@@ -826,14 +861,15 @@ fn list_files(
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
-  use <- local_only(host, "the file browser")
   case query_rel_path(req) {
     Error(_) -> json_response(400, error_body("invalid path"))
     Ok(rel) ->
       case thread_root(cx, thread_id) {
         Error(message) -> json_response(500, error_body(message))
         Ok(root) ->
-          case files.list_directory(files.resolve(root, rel)) {
+          case
+            workspace.list_directory(ws_for(host, cx), files.resolve(root, rel))
+          {
             Error(message) -> json_response(404, error_body(message))
             Ok(entries) ->
               json_response(
@@ -855,7 +891,6 @@ fn read_file(
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
-  use <- local_only(host, "the file browser")
   case query_rel_path(req) {
     Error(_) -> json_response(400, error_body("invalid path"))
     Ok("") -> json_response(400, error_body("file path is required"))
@@ -866,26 +901,36 @@ fn read_file(
           let meta = fn(size: Int) {
             [#("path", json.string(rel)), #("size", json.int(size))]
           }
-          case files.read_file(files.resolve(root, rel)) {
-            files.Text(size, content) ->
-              json_response(
-                200,
-                json.object([#("content", json.string(content)), ..meta(size)]),
-              )
-            files.Binary(size) ->
-              json_response(
-                200,
-                json.object([#("binary", json.bool(True)), ..meta(size)]),
-              )
-            files.TooLarge(size) ->
-              json_response(
-                200,
-                json.object([#("tooLarge", json.bool(True)), ..meta(size)]),
-              )
-            files.Missing -> json_response(404, error_body("file not found"))
+          case workspace.read_file(ws_for(host, cx), files.resolve(root, rel)) {
+            Error(message) -> json_response(500, error_body(message))
+            Ok(content) -> render_file_content(content, meta)
           }
         }
       }
+  }
+}
+
+fn render_file_content(
+  content: files.FileContent,
+  meta: fn(Int) -> List(#(String, Json)),
+) -> Response(ResponseData) {
+  case content {
+    files.Text(size, content) ->
+      json_response(
+        200,
+        json.object([#("content", json.string(content)), ..meta(size)]),
+      )
+    files.Binary(size) ->
+      json_response(
+        200,
+        json.object([#("binary", json.bool(True)), ..meta(size)]),
+      )
+    files.TooLarge(size) ->
+      json_response(
+        200,
+        json.object([#("tooLarge", json.bool(True)), ..meta(size)]),
+      )
+    files.Missing -> json_response(404, error_body("file not found"))
   }
 }
 
@@ -908,12 +953,11 @@ fn git_changes(
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
-  use <- local_only(host, "the Git changes viewer")
   case git_scope(req), thread_root(cx, thread_id) {
     Error(_), _ -> json_response(400, error_body("invalid diff scope"))
     _, Error(message) -> json_response(500, error_body(message))
     Ok(scope), Ok(root) ->
-      case git.changes_json(root, scope) {
+      case git.changes_json(repo_for(host, cx, root), scope) {
         Ok(body) -> json_response(200, body)
         Error(message) -> json_response(500, error_body(message))
       }
@@ -926,7 +970,6 @@ fn git_diff(
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
-  use <- local_only(host, "the Git changes viewer")
   let raw_path = query_value(req, "path")
   case git_scope(req), files.sanitize(raw_path), thread_root(cx, thread_id) {
     Error(_), _, _ -> json_response(400, error_body("invalid diff scope"))
@@ -934,38 +977,113 @@ fn git_diff(
     _, Ok(""), _ -> json_response(400, error_body("file path is required"))
     _, _, Error(message) -> json_response(500, error_body(message))
     Ok(scope), Ok(path), Ok(root) ->
-      case git.diff_json(root, scope, path) {
+      case git.diff_json(repo_for(host, cx, root), scope, path) {
         Ok(body) -> json_response(200, body)
         Error(message) -> json_response(500, error_body(message))
       }
   }
 }
 
-/// Features that read yacwu's own filesystem only make sense for sessions on
-/// this machine; remote sessions get a clear "not yet" answer instead.
-fn local_only(
-  host: String,
-  feature: String,
-  handler: fn() -> Response(ResponseData),
-) -> Response(ResponseData) {
+/// The workspace a session's files live in: this machine, or the remote
+/// machine reached through the session's app-server.
+fn ws_for(host: String, cx: Codex) -> workspace.Workspace {
   case host == hosts.local {
-    True -> handler()
+    True -> workspace.LocalWorkspace
+    False -> workspace.RemoteWorkspace(cx)
+  }
+}
+
+/// The session's Git repository, executed locally or via the remote
+/// app-server's `command/exec`.
+fn repo_for(host: String, cx: Codex, root: String) -> git.Repo {
+  case host == hosts.local {
+    True -> git.local_repo(root)
     False ->
-      json_response(
-        501,
-        error_body(feature <> " is not yet available for remote sessions"),
+      git.Repo(
+        exec: workspace.exec_git(cx, root, _),
+        read_file: fn(rel) {
+          workspace.read_file(
+            workspace.RemoteWorkspace(cx),
+            files.resolve(root, rel),
+          )
+          |> result.unwrap(files.Missing)
+        },
+        cwd: root,
       )
+  }
+}
+
+/// Rollouts live beside the session's codex: read them locally, or over the
+/// link (size-capped) for remote sessions.
+fn rollout_reader(
+  host: String,
+  cx: Codex,
+) -> fn(String) -> Result(model_state.Persisted, Nil) {
+  case host == hosts.local {
+    True -> model_state.read_latest_turn_model
+    False -> fn(path) {
+      workspace.read_binary(workspace.RemoteWorkspace(cx), path, 4_000_000)
+      |> result.replace_error(Nil)
+      |> result.try(fn(bits) {
+        bit_array.to_string(bits) |> result.replace_error(Nil)
+      })
+      |> result.try(model_state.parse_latest_turn_model)
+    }
+  }
+}
+
+/// The codex home holding a host's profile files.
+fn host_codex_home(host: String, cx: Codex) -> String {
+  case host == hosts.local {
+    True -> profiles.codex_home()
+    False -> codex.info(cx).codex_home
+  }
+}
+
+/// A host's available profiles ($CODEX_HOME/<name>.config.toml on the
+/// machine the session runs on).
+fn host_profiles(host: String, cx: Codex) -> List(profiles.Profile) {
+  case host == hosts.local {
+    True -> profiles.list_profiles()
+    False -> {
+      let home = host_codex_home(host, cx)
+      case home {
+        "" -> []
+        _ -> {
+          let ws = workspace.RemoteWorkspace(cx)
+          case workspace.list_directory(ws, home) {
+            Error(_) -> []
+            Ok(entries) ->
+              entries
+              |> list.filter_map(fn(entry) {
+                profiles.profile_file_name(entry.name)
+              })
+              |> list.sort(string.compare)
+              |> list.filter_map(fn(name) {
+                case
+                  workspace.read_file(ws, home <> "/" <> name <> ".config.toml")
+                {
+                  Ok(files.Text(_, content)) ->
+                    profiles.parse_profile(name, content)
+                  _ -> Error(Nil)
+                }
+              })
+          }
+        }
+      }
+    }
   }
 }
 
 // -- /api/profiles and /api/threads/[id]/profile ------------------------------
 
-/// Available codex profiles ($CODEX_HOME/<name>.config.toml files).
-fn list_profiles() -> Response(ResponseData) {
+/// Available codex profiles ($CODEX_HOME/<name>.config.toml files on the
+/// requested host).
+fn list_profiles(host: String, cx: Codex) -> Response(ResponseData) {
   json_response(
     200,
     json.object([
-      #("profiles", profiles.profiles_to_json(profiles.list_profiles())),
+      #("profiles", profiles.profiles_to_json(host_profiles(host, cx))),
     ]),
   )
 }
@@ -978,18 +1096,30 @@ fn resolve_profile(
   ctx: Context,
   thread_id: String,
   available: List(profiles.Profile),
-  rollout_path: Result(String, Nil),
+  persisted_model: fn() -> Result(String, Nil),
 ) -> Result(profiles.Profile, Nil) {
   case profiles.get_selection(ctx.profile_store, thread_id) {
     Ok(name) -> profiles.find(available, name)
     Error(_) -> {
-      use path <- result.try(rollout_path)
-      use persisted <- result.try(model_state.read_latest_turn_model(path))
-      use model <- result.try(option.to_result(persisted.model, Nil))
+      use model <- result.try(persisted_model())
       use profile <- result.try(profiles.infer_for_model(available, model))
       profiles.set_selection(ctx.profile_store, thread_id, Some(profile.name))
       Ok(profile)
     }
+  }
+}
+
+/// Lazy "which model did this session last persist" lookup for profile
+/// inference, reading the rollout on the session's own machine.
+fn persisted_model_via(
+  host: String,
+  cx: Codex,
+  rollout_path: fn() -> Result(String, Nil),
+) -> fn() -> Result(String, Nil) {
+  fn() {
+    use path <- result.try(rollout_path())
+    use persisted <- result.try(rollout_reader(host, cx)(path))
+    option.to_result(persisted.model, Nil)
   }
 }
 
@@ -1016,17 +1146,13 @@ fn profile_model_settings(
   cx: Codex,
   thread_id: String,
 ) -> model_state.Persisted {
-  // Profiles are files in the *local* codex home; remote sessions have none.
-  let resolved = case host == hosts.local {
-    False -> Error(Nil)
-    True ->
-      resolve_profile(
-        ctx,
-        thread_id,
-        profiles.list_profiles(),
-        thread_rollout_path(cx, thread_id),
-      )
-  }
+  let resolved =
+    resolve_profile(
+      ctx,
+      thread_id,
+      host_profiles(host, cx),
+      persisted_model_via(host, cx, fn() { thread_rollout_path(cx, thread_id) }),
+    )
   case resolved {
     Ok(profile) ->
       model_state.Persisted(
@@ -1057,18 +1183,15 @@ fn get_profile(
   cx: Codex,
   thread_id: String,
 ) -> Response(ResponseData) {
-  case host == hosts.local {
-    // Profiles live in the local codex home; remote sessions have none.
-    False -> json_response(200, profile_state_json(Error(Nil), []))
-    True -> {
-      let available = profiles.list_profiles()
-      let selected =
-        resolve_profile(ctx, thread_id, available, {
-          thread_rollout_path(cx, thread_id)
-        })
-      json_response(200, profile_state_json(selected, available))
-    }
-  }
+  let available = host_profiles(host, cx)
+  let selected =
+    resolve_profile(
+      ctx,
+      thread_id,
+      available,
+      persisted_model_via(host, cx, fn() { thread_rollout_path(cx, thread_id) }),
+    )
+  json_response(200, profile_state_json(selected, available))
 }
 
 /// Select (or clear) a session's profile. Selecting re-resumes the thread
@@ -1082,9 +1205,8 @@ fn post_profile(
   req: Request(Connection),
   thread_id: String,
 ) -> Response(ResponseData) {
-  use <- local_only(host, "profile selection")
   let body = read_json_body(req)
-  let available = profiles.list_profiles()
+  let available = host_profiles(host, cx)
   let requested =
     jsonx.field_string(body, ["profile"])
     |> result.unwrap("")
@@ -1335,15 +1457,13 @@ fn create_thread_on(
     _, _ -> Ok(params)
   }
 
-  let profile = case jsonx.field_string(body, ["profile"]), local {
-    Ok(name), True if name != "" ->
-      case profiles.find(profiles.list_profiles(), string.trim(name)) {
+  let profile = case jsonx.field_string(body, ["profile"]) {
+    Ok(name) if name != "" ->
+      case profiles.find(host_profiles(host, cx), string.trim(name)) {
         Ok(profile) -> Ok(Some(profile))
         Error(_) -> Error("unknown profile: " <> string.trim(name))
       }
-    Ok(name), False if name != "" ->
-      Error("profiles are not yet supported for remote sessions")
-    _, _ -> Ok(None)
+    _ -> Ok(None)
   }
 
   case cwd_params, profile {
@@ -1479,12 +1599,18 @@ fn open_thread(
     Error(_) -> ""
   }
 
-  // In-use detection scans this machine's processes, so it only means
-  // something for local sessions; remote opens skip it for now.
-  let holders = case force || host != hosts.local {
-    True -> []
-    False ->
+  // In-use detection: scan for *other* codex processes holding this
+  // session's rollout open — on this machine for local sessions, over ssh
+  // on the session's machine for remote ones.
+  let holders = case force, host == hosts.local {
+    True, _ -> []
+    False, True ->
       session_lock.detect_external_holders(rollout_path, codex.os_pid(cx))
+    False, False ->
+      remote.detect_holders(host, rollout_path, codex.info(cx).socket)
+      |> list.map(fn(holder) {
+        session_lock.SessionHolder(pid: holder.0, command: holder.1)
+      })
   }
   case holders {
     [_, ..] -> {
@@ -1515,22 +1641,20 @@ fn open_thread(
     }
     [] -> {
       // Layer the session's profile (chosen earlier, or inferred from the
-      // session's model) into the resume. Profiles are re-read from disk on
-      // every open so edits to the files take effect immediately. Remote
-      // sessions have no profiles (they are local codex-home files).
-      let profile = case host == hosts.local {
-        False -> Error(Nil)
-        True ->
-          resolve_profile(
-            ctx,
-            thread_id,
-            profiles.list_profiles(),
+      // session's model) into the resume. Profiles are re-read on every open
+      // so edits to the files take effect immediately.
+      let profile =
+        resolve_profile(
+          ctx,
+          thread_id,
+          host_profiles(host, cx),
+          persisted_model_via(host, cx, fn() {
             case rollout_path {
               "" -> Error(Nil)
               path -> Ok(path)
-            },
-          )
-      }
+            }
+          }),
+        )
       let resume_params = [
         #("threadId", json.string(thread_id)),
         ..defaults.thread_defaults()
@@ -1680,7 +1804,10 @@ fn image_extension(filename: Option(String), content_type: String) -> String {
   }
 }
 
-fn stage_image(part: Part) -> Result(String, String) {
+/// Stage an uploaded image where the session's codex can read it by path:
+/// a local temp file, or (for remote sessions) an upload directory under the
+/// remote home, written through the app-server.
+fn stage_image(host: String, cx: Codex, part: Part) -> Result(String, String) {
   let display = case part.filename {
     Some(name) if name != "" -> name
     _ -> "upload"
@@ -1689,15 +1816,26 @@ fn stage_image(part: Part) -> Result(String, String) {
   case string.starts_with(content_type, "image/") {
     False -> Error(display <> " is not an image")
     True -> {
-      let tmp = envoy.get("TMPDIR") |> result.unwrap("/tmp")
       let name =
         "yacwu-"
         <> string.lowercase(
           bit_array.base16_encode(crypto.strong_random_bytes(16)),
         )
         <> image_extension(part.filename, content_type)
-      let path = filepath.join(tmp, name)
-      case simplifile.write_bits(path, part.data) {
+      use dir <- result.try(case host == hosts.local {
+        True -> Ok(envoy.get("TMPDIR") |> result.unwrap("/tmp"))
+        False ->
+          case codex.info(cx).home {
+            "" -> Error("remote home directory unknown; reconnect and retry")
+            home -> {
+              let dir = home <> "/.cache/yacwu/uploads"
+              workspace.create_directory(ws_for(host, cx), dir)
+              |> result.replace(dir)
+            }
+          }
+      })
+      let path = filepath.join(dir, name)
+      case workspace.write_file(ws_for(host, cx), path, part.data) {
         Ok(_) -> Ok(path)
         Error(_) -> Error("failed to store " <> display)
       }
@@ -1747,28 +1885,21 @@ fn message(
         list.filter(parts, fn(part) {
           part.name == "images" && part.data != <<>>
         })
-      // Staged images are local temp files codex reads by path; a remote
-      // codex cannot see them.
-      case images != [] && host != hosts.local {
-        True ->
-          Error("image attachments are not yet supported for remote sessions")
-        False ->
-          list.try_fold(images, [], fn(acc, part) {
-            stage_image(part)
-            |> result.map(fn(path) {
-              [
-                json.object([
-                  #("type", json.string("localImage")),
-                  #("path", json.string(path)),
-                ]),
-                ..acc
-              ]
-            })
-          })
-          |> result.map(fn(image_inputs) {
-            list.append(text_input, list.reverse(image_inputs))
-          })
-      }
+      list.try_fold(images, [], fn(acc, part) {
+        stage_image(host, cx, part)
+        |> result.map(fn(path) {
+          [
+            json.object([
+              #("type", json.string("localImage")),
+              #("path", json.string(path)),
+            ]),
+            ..acc
+          ]
+        })
+      })
+      |> result.map(fn(image_inputs) {
+        list.append(text_input, list.reverse(image_inputs))
+      })
     }
     False -> {
       let body = read_json_body(req)
@@ -1797,8 +1928,7 @@ fn message(
       // An explicit /model override wins; otherwise the session's selected
       // profile supplies model/effort. (turn/start has no `config` param, so
       // only these two profile keys can apply at turn level — the full
-      // profile config is layered on thread start/resume. Profiles are
-      // local-only files, so remote sessions skip that fallback.)
+      // profile config is layered on thread start/resume.)
       let params = case model_state.get_override(ctx.store, thread_id) {
         Ok(settings) ->
           list.append(params, [
@@ -1807,12 +1937,13 @@ fn message(
           ])
         Error(_) ->
           case
-            host == hosts.local,
             profiles.get_selection(ctx.profile_store, thread_id)
-            |> result.try(profiles.find(profiles.list_profiles(), _))
+            |> result.try(fn(name) {
+              profiles.find(host_profiles(host, cx), name)
+            })
           {
-            False, _ | True, Error(_) -> params
-            True, Ok(profile) -> {
+            Error(_) -> params
+            Ok(profile) -> {
               let params = case profile.model {
                 Some(model) ->
                   list.append(params, [#("model", json.string(model))])
@@ -1941,6 +2072,7 @@ fn get_model(
       ctx.store,
       thread_id,
       profile: profile_model_settings(ctx, host, cx, thread_id),
+      read_rollout: rollout_reader(host, cx),
     )
   {
     Ok(state) -> json_response(200, model_state.state_to_json(state))
@@ -1983,6 +2115,7 @@ fn post_model(
           model,
           effort,
           profile: profile_model_settings(ctx, host, cx, thread_id),
+          read_rollout: rollout_reader(host, cx),
         )
       {
         Ok(state) -> json_response(200, model_state.state_to_json(state))

@@ -32,7 +32,9 @@ state lives entirely in Codex's own persistent sessions, read back via
   `~/.ssh/config` when creating a session. yacwu bootstraps a **persistent**
   app-server on the remote machine (`--listen unix://` + streamlocal
   forwarding — no TCP ports), and reconnects with backoff after SSH drops or
-  yacwu restarts while remote turns keep running. See [docs/remote.md](docs/remote.md)
+  yacwu restarts while remote turns keep running. Full feature parity: the
+  file browser, Git viewer, images, profiles, and in-use detection all
+  operate on the remote machine. See [docs/remote.md](docs/remote.md)
 - 🗄️ No storage layer — Codex is the source of truth
 
 ## Slash commands

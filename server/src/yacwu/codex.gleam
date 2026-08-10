@@ -101,9 +101,17 @@ pub type Transport {
 pub type Reply =
   Result(Dynamic, String)
 
-/// Host connection details for /api/hosts and the UI.
+/// Host connection details for /api/hosts, remote workspace operations,
+/// and the UI. `codex_home` and `socket` are only known for SSH transports
+/// once a bootstrap has run ("" until then, and always "" for local).
 pub type HostInfo {
-  HostInfo(state: String, home: String, error: String)
+  HostInfo(
+    state: String,
+    home: String,
+    codex_home: String,
+    socket: String,
+    error: String,
+  )
 }
 
 pub opaque type Msg {
@@ -117,7 +125,9 @@ pub opaque type Msg {
     remote_sock: String,
     reply: Subject(Result(Nil, String)),
   )
-  ConnResult(Result(#(remote.Socket, BitArray, String), String))
+  ConnResult(
+    Result(#(remote.Socket, BitArray, Option(remote.Bootstrap)), String),
+  )
   TryReconnect
   PortData(BitArray)
   PortExit(Int)
@@ -243,6 +253,8 @@ type State {
     /// reconnect so their notifications keep flowing.
     resumed: List(String),
     home: String,
+    codex_home: String,
+    remote_sock: String,
     backoff: Int,
     last_error: String,
   )
@@ -265,6 +277,8 @@ fn initial_state(self: Codex, label: String, transport: Transport) -> State {
       Ssh(_) -> ""
       _ -> local_home()
     },
+    codex_home: "",
+    remote_sock: "",
     backoff: 0,
     last_error: "",
   )
@@ -341,7 +355,13 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
       }
       process.send(
         reply,
-        HostInfo(connection_state, state.home, state.last_error),
+        HostInfo(
+          connection_state,
+          state.home,
+          state.codex_home,
+          state.remote_sock,
+          state.last_error,
+        ),
       )
       actor.continue(state)
     }
@@ -507,7 +527,9 @@ fn spawn_connector(state: State) -> Nil {
     let result = case transport {
       UnixSock(path) ->
         remote.attach(path, owner, 10)
-        |> result.map(fn(handover) { #(handover.socket, handover.leftover, "") })
+        |> result.map(fn(handover) {
+          #(handover.socket, handover.leftover, None)
+        })
       Ssh(host) -> {
         use boot <- result.try(remote.bootstrap(host))
         let local = remote.local_socket_path(host)
@@ -515,7 +537,7 @@ fn spawn_connector(state: State) -> Nil {
           process.call(subject, 15_000, OpenForwarder(local, boot.socket, _)),
         )
         use handover <- result.try(remote.attach(local, owner, 40))
-        Ok(#(handover.socket, handover.leftover, boot.home))
+        Ok(#(handover.socket, handover.leftover, Some(boot)))
       }
       Local -> Error("local transport needs no connector")
     }
@@ -555,21 +577,22 @@ fn on_open_forwarder(
 
 fn on_conn_result(
   state: State,
-  result: Result(#(remote.Socket, BitArray, String), String),
+  result: Result(#(remote.Socket, BitArray, Option(remote.Bootstrap)), String),
 ) -> actor.Next(State, Msg) {
   case state.status, result {
-    Connecting(queued), Ok(#(socket, leftover, home)) -> {
+    Connecting(queued), Ok(#(socket, leftover, boot)) -> {
       remote.activate(socket)
-      let state =
-        State(
-          ..state,
-          decoder: ws.new_decoder(),
-          home: case home {
-            "" -> state.home
-            _ -> home
-          },
-          last_error: "",
-        )
+      let state = case boot {
+        Some(boot) ->
+          State(
+            ..state,
+            home: boot.home,
+            codex_home: boot.codex_home,
+            remote_sock: boot.socket,
+          )
+        None -> state
+      }
+      let state = State(..state, decoder: ws.new_decoder(), last_error: "")
       let state = begin_initialize(state, SockConn(socket), queued)
       // Bytes that arrived while the handshake was read belong to the
       // stream; run them through the normal frame path.

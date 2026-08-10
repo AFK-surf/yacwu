@@ -196,8 +196,9 @@ pub type Persisted {
   Persisted(model: Option(String), effort: Option(String))
 }
 
-/// Read the latest persisted turn context from a rollout file. Returns
-/// `Error(Nil)` when the file is missing or holds no turn context.
+/// Read the latest persisted turn context from a rollout file on this
+/// machine. Returns `Error(Nil)` when the file is missing or holds no turn
+/// context.
 pub fn read_latest_turn_model(path: String) -> Result(Persisted, Nil) {
   case path {
     "" -> Error(Nil)
@@ -205,11 +206,17 @@ pub fn read_latest_turn_model(path: String) -> Result(Persisted, Nil) {
       use content <- result.try(
         simplifile.read(path) |> result.replace_error(Nil),
       )
-      string.split(content, "\n")
-      |> list.reverse
-      |> list.find_map(parse_turn_context)
+      parse_latest_turn_model(content)
     }
   }
+}
+
+/// The latest persisted turn context in rollout content, wherever the
+/// content came from (remote sessions read the rollout over the link).
+pub fn parse_latest_turn_model(content: String) -> Result(Persisted, Nil) {
+  string.split(content, "\n")
+  |> list.reverse
+  |> list.find_map(parse_turn_context)
 }
 
 fn parse_turn_context(line: String) -> Result(Persisted, Nil) {
@@ -281,6 +288,7 @@ pub fn get_thread_model_state(
   store: Store,
   thread_id: String,
   profile profile: Persisted,
+  read_rollout read_rollout: fn(String) -> Result(Persisted, Nil),
 ) -> Result(ModelState, String) {
   use catalog <- result.try(list_model_choices(codex))
   case get_override(store, thread_id) {
@@ -301,7 +309,7 @@ pub fn get_thread_model_state(
         Ok(read) ->
           case jsonx.field_string(read, ["thread", "path"]) {
             Ok(path) ->
-              read_latest_turn_model(path)
+              read_rollout(path)
               |> result.unwrap(Persisted(None, None))
             Error(_) -> Persisted(None, None)
           }
@@ -338,12 +346,14 @@ pub fn set_thread_model_state(
   requested_model: Option(String),
   requested_effort: Option(String),
   profile profile: Persisted,
+  read_rollout read_rollout: fn(String) -> Result(Persisted, Nil),
 ) -> Result(ModelState, String) {
   use current <- result.try(get_thread_model_state(
     codex,
     store,
     thread_id,
     profile: profile,
+    read_rollout: read_rollout,
   ))
   let model = option.unwrap(requested_model, current.settings.model)
   use choice <- result.try(

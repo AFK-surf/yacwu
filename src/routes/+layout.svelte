@@ -667,10 +667,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			localStorage.setItem('yacwu-sidebar-hidden', 'false');
 		}
 		// Always re-fetch: the backend reads profile files fresh from disk.
-		fetch('/api/profiles')
-			.then((r) => r.json())
-			.then((d) => (profileChoices = (d.profiles ?? []) as ProfileChoice[]))
-			.catch(() => (profileChoices = []));
+		void loadProfileChoices(LOCAL_HOST);
 		await tick();
 		cwdInputEl?.focus();
 	}
@@ -759,8 +756,22 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		}
 	}
 
+	/** Profiles live on the session's machine; re-fetch when the host changes. */
+	async function loadProfileChoices(host: string) {
+		profileChoices = [];
+		try {
+			const res = await fetch(`/api/profiles${hostQuery(host)}`);
+			const data = await res.json();
+			if (newHost === host) profileChoices = (data.profiles ?? []) as ProfileChoice[];
+		} catch {
+			if (newHost === host) profileChoices = [];
+		}
+	}
+
 	function onNewHostChange() {
 		createError = null;
+		newProfile = '';
+		void loadProfileChoices(newHost);
 		if (isRemoteHost(newHost) && hostDefaultCwds[newHost] === undefined) {
 			void loadHostSessions(newHost);
 		}
@@ -776,7 +787,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
 				...(cwd ? { cwd } : {}),
-				...(profile && !remote ? { profile } : {}),
+				...(profile ? { profile } : {}),
 				...(remote ? { host } : {})
 			})
 		});
@@ -1630,6 +1641,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	function imageSrc(path: string): string {
+		if (isRemoteHost(activeHost)) {
+			return `/api/images?path=${encodeURIComponent(path)}&host=${encodeURIComponent(activeHost)}`;
+		}
 		if (/^https?:\/\//i.test(path)) return path;
 		return `/api/images?path=${encodeURIComponent(path)}`;
 	}
@@ -2353,7 +2367,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						autocomplete="off"
 					/>
 				</div>
-				{#if profileChoices.length > 0 && !isRemoteHost(newHost)}
+				{#if profileChoices.length > 0}
 					<div class="create-row">
 						<label for="new-profile">Profile</label>
 						<select id="new-profile" class="profile-input" bind:value={newProfile}>
@@ -2554,7 +2568,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					{/if}
 				</div>
 				<div class="session-state">
-					{#if !activeRemote}
 					<button
 						class="files-trigger"
 						type="button"
@@ -2568,7 +2581,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							<path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z" />
 						</svg>
 					</button>
-					{/if}
 					<button
 						class="session-info-trigger"
 						type="button"
@@ -2603,6 +2615,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					<FileBrowser
 						threadId={activeId}
 						cwd={cwds[activeId] ?? activeSummary?.cwd ?? ''}
+						host={activeHost}
 						reveal={filesReveal}
 						refreshNonce={filesRefresh}
 						onchanges={() => openChangesPanel()}
@@ -2870,7 +2883,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 											{@const rel = displayFileChangePath(ch)}
 											<div class="fc">
 												<span class="kind {fileChangeClass(ch)}" aria-label={fileChangeKind(ch)} title={fileChangeKind(ch)}>{fileChangeSymbol(ch)}</span>
-												{#if !rel.startsWith('/') && !activeRemote}
+												{#if !rel.startsWith('/')}
 													<button
 														type="button"
 														class="path path-link"
@@ -3040,14 +3053,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							multiple
 							onchange={onImagesSelected}
 						/>
-						<button
-							class="attach"
-							type="button"
-							onclick={chooseImages}
-							disabled={activeRemote}
-							title={activeRemote ? 'Image attachments are not yet supported for remote sessions' : 'Attach images'}
-							aria-label="Attach images"
-						>
+						<button class="attach" type="button" onclick={chooseImages} title="Attach images" aria-label="Attach images">
 							<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
 								<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
 							</svg>

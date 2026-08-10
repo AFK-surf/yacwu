@@ -94,20 +94,33 @@ The remote server writes its socket, pidfile, and log under
 to look when a host errors at startup). yacwu never stops a remote server —
 outliving yacwu is the point; stop it manually with the pidfile if needed.
 
-## Current limitations (deliberate, staged)
+## Feature parity
 
-These return clear errors/hide themselves in the UI for remote sessions, and
-have protocol-level paths forward (mostly the app-server `fs/*` API):
+Every feature works identically on local and remote sessions. The
+workspace-facing ones route through the session's own app-server
+(`server/src/yacwu/workspace.gleam`), so they ride the existing multiplexed
+link — no extra ssh round-trips:
 
-- the file browser (reads yacwu's local filesystem today);
-- the Git changes viewer (runs `git` on yacwu's machine in the session cwd);
-- image attachments (staged as local temp files codex reads by path);
-- codex profiles (files in the *local* `$CODEX_HOME`);
-- "session in use elsewhere" detection (scans local `/proc`).
-
-Everything else — messages, streaming, interrupts, goals, models, fast mode,
-reviews, shell commands, forks, side conversations, rollback, archive —
-works identically on remote sessions.
+- **File browser** — listings run one `sh` pass via `command/exec` (entry
+  kinds/symlinks from shell builtins, all sizes from a single `wc -c`);
+  file contents come through `fs/readFile` (base64, binary-safe) after a
+  size probe, with the same 1 MB display cap as local.
+- **Git changes viewer** — `git` executes on the session's machine through
+  `command/exec` in the session cwd; parsing, scopes, untracked `--no-index`
+  diffs, and Monaco original/modified contents are shared with the local
+  path (`git.Repo` abstracts the executor and file reader).
+- **Image attachments** — uploads are staged into
+  `~/.cache/yacwu/uploads/` on the remote machine via `fs/writeFile`, so
+  codex reads them by path as usual; transcript images are served back
+  through `fs/readFile` (10 MB cap).
+- **Profiles** — `$CODEX_HOME/<name>.config.toml` files on the *session's*
+  machine (the bootstrap reports the remote codex home), listed and parsed
+  over the link; selection, layering on start/resume, and model inference
+  from the remote rollout all work as locally.
+- **In-use detection** — opens scan the remote `/proc` over ssh for other
+  processes holding the session's rollout, excluding the session's own
+  app-server by command line; non-Linux remotes degrade to "no detection",
+  like unsupported local platforms.
 
 ## Security notes
 
