@@ -10,6 +10,7 @@ import gleam/io
 import gleam/option.{None, Some}
 import gleam/otp/static_supervisor as supervisor
 import gleam/result
+import gleam/string
 import mist
 import yacwu/auth
 import yacwu/config
@@ -103,7 +104,15 @@ authentication (e.g. bound to localhost only).",
       |> mist.bind(conf.host)
       |> mist.port(conf.port)
   }
-  let assert Ok(_) =
+  // Trap exits so the supervisor's death arrives as a message rather than
+  // silently killing this process. A tree that exhausts its restart
+  // tolerance must end the OS process with a non-zero status so a process
+  // manager can restart yacwu: under `erl -eval` launches (dev runs and the
+  // AppImage's shipment entrypoint) an untrapped exit leaves the VM alive
+  // with no children and no listener, and nothing ever notices.
+  process.trap_exits(True)
+
+  let assert Ok(supervisor_started) =
     supervisor.new(supervisor.OneForOne)
     |> supervisor.restart_tolerance(intensity: 5, period: 30)
     |> supervisor.add(hosts.supervised(registry_name))
@@ -143,5 +152,33 @@ authentication (e.g. bound to localhost only).",
         "  WARNING: authentication disabled (YACWU_INSECURE_SKIP_AUTH=1)",
       )
   }
-  process.sleep_forever()
+  run_until_shutdown(supervisor_started.pid)
+}
+
+/// Block until the supervision tree gives up, then exit non-zero. Exits from
+/// anything else linked to this process are ignored.
+fn run_until_shutdown(supervisor_pid: process.Pid) -> Nil {
+  let exit =
+    process.new_selector()
+    |> process.select_trapped_exits(fn(exit) { exit })
+    |> process.selector_receive_forever
+  case exit.pid == supervisor_pid {
+    False -> run_until_shutdown(supervisor_pid)
+    True -> {
+      io.println_error(
+        "yacwu: the supervision tree exhausted its restart tolerance ("
+        <> exit_reason_text(exit.reason)
+        <> "); exiting so a process manager can restart yacwu",
+      )
+      halt(1)
+    }
+  }
+}
+
+fn exit_reason_text(reason: process.ExitReason) -> String {
+  case reason {
+    process.Normal -> "normal exit"
+    process.Killed -> "killed"
+    process.Abnormal(reason) -> string.inspect(reason)
+  }
 }
