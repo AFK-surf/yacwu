@@ -63,13 +63,16 @@ Type these in the composer (anything not starting with `/` is a normal model tur
 
 ```bash
 bun install
-bun run build        # build the web UI into ./build
-bun run start        # serve UI + API on http://127.0.0.1:3000
+bun run build                              # build the web UI into ./build
+YACWU_INSECURE_SKIP_AUTH=1 bun run start   # serve UI + API on http://127.0.0.1:3000
 ```
 
 `bun run start` runs the Gleam server (`server/`), which serves the static UI
 build, the REST/SSE API, and spawns/manages the single `codex app-server`
-process. The listening address is configurable:
+process. The server fails closed: it refuses to start unless authentication
+is configured (see [Authentication](#authentication)) or
+`YACWU_INSECURE_SKIP_AUTH=1` explicitly opts into running open, as above for
+a localhost-only setup. The listening address is configurable:
 
 ```bash
 cd server
@@ -135,7 +138,8 @@ it with `--appimage-extract-and-run`).
 
 ```bash
 bun install
-bun run dev:server   # Gleam API backend on http://127.0.0.1:3000
+YACWU_INSECURE_SKIP_AUTH=1 bun run dev:server
+                     # Gleam API backend on http://127.0.0.1:3000
 bun run dev          # Vite dev server on http://127.0.0.1:5173 (proxies /api)
 ```
 
@@ -145,8 +149,10 @@ unchanged. Set `YACWU_API` to proxy to a backend on a different address.
 
 ## Authentication
 
-Two mechanisms, usable separately or together. With neither configured the
-server is open — keep it bound to localhost.
+Two mechanisms, usable separately or together. The server fails closed: with
+neither configured it refuses to start (and rejects every request with `403`)
+unless `YACWU_INSECURE_SKIP_AUTH=1` explicitly opts into running without
+authentication — only do that on a trusted network, e.g. bound to localhost.
 
 ### Forward auth
 

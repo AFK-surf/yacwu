@@ -31,6 +31,14 @@ pub fn allowed_remote_users() -> List(String) {
   |> list.filter(fn(user) { user != "" })
 }
 
+/// True when the operator explicitly opted into running without any
+/// authentication (`YACWU_INSECURE_SKIP_AUTH=1`). With neither forward auth
+/// nor OAuth configured, the server refuses to serve unless this is set —
+/// failing closed rather than silently open.
+pub fn insecure_skip_auth() -> Bool {
+  envoy.get("YACWU_INSECURE_SKIP_AUTH") == Ok("1")
+}
+
 /// Returns `Error(denial)` when the request must be rejected, `Ok(Nil)` when
 /// allowed. No-op when no allowlist is configured.
 pub fn check_remote_user(header: Result(String, Nil)) -> Result(Nil, Denial) {

@@ -11,6 +11,7 @@ import gleam/option.{None, Some}
 import gleam/otp/static_supervisor as supervisor
 import gleam/result
 import mist
+import yacwu/auth
 import yacwu/codex
 import yacwu/config
 import yacwu/model_state
@@ -61,6 +62,22 @@ fn serve(conf: config.Config) -> Nil {
       True
     }
     None -> False
+  }
+
+  // Fail closed: with no authentication configured, refuse to start unless
+  // the operator explicitly opted into running open.
+  let forward_enabled = auth.allowed_remote_users() != []
+  case oauth_enabled || forward_enabled || auth.insecure_skip_auth() {
+    True -> Nil
+    False -> {
+      io.println_error(
+        "yacwu: no authentication configured, refusing to start.
+Configure forward auth (--remote-user / YACWU_REMOTE_USERS), built-in OAuth
+(YACWU_OAUTH_*), or set YACWU_INSECURE_SKIP_AUTH=1 to run without
+authentication (e.g. bound to localhost only).",
+      )
+      halt(1)
+    }
   }
 
   let codex_name = process.new_name("yacwu_codex")
@@ -120,6 +137,13 @@ fn serve(conf: config.Config) -> Nil {
   case oauth_enabled {
     True -> io.println("  OAuth login: enabled")
     False -> Nil
+  }
+  case oauth_enabled || forward_enabled {
+    True -> Nil
+    False ->
+      io.println(
+        "  WARNING: authentication disabled (YACWU_INSECURE_SKIP_AUTH=1)",
+      )
   }
   process.sleep_forever()
 }

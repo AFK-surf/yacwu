@@ -39,6 +39,10 @@ Environment:
                       TOKEN_URL), CLIENT_ID, CLIENT_SECRET, USERINFO_URL,
                       SCOPES, USER_CLAIM, USERS, REDIRECT_URL, COOKIE_SECRET,
                       SESSION_TTL — see the README's Authentication section
+  YACWU_INSECURE_SKIP_AUTH=1
+                      run without any authentication (otherwise the server
+                      refuses to start when neither forward auth nor OAuth
+                      is configured)
 "
 
 pub type Config {

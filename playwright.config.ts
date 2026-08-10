@@ -20,7 +20,8 @@ export default defineConfig({
 	projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
 	webServer: {
 		// Build the static SPA, then serve it (and the API) from the Gleam backend.
-		command: `bun run build && cd server && YACWU_STATIC=../build gleam run -- --host 127.0.0.1 --port ${port}`,
+		// The server fails closed without auth; the e2e suite runs it open on loopback.
+		command: `bun run build && cd server && YACWU_STATIC=../build YACWU_INSECURE_SKIP_AUTH=1 gleam run -- --host 127.0.0.1 --port ${port}`,
 		url: baseURL,
 		reuseExistingServer: true,
 		timeout: 120_000

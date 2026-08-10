@@ -41,3 +41,13 @@ pub fn empty_header_value_is_missing_test() {
   assert auth.check_remote_user(Ok("   "))
     == Error(auth.Denial(401, "Missing Remote-User header"))
 }
+
+pub fn insecure_skip_auth_requires_exactly_1_test() {
+  envoy.unset("YACWU_INSECURE_SKIP_AUTH")
+  assert !auth.insecure_skip_auth()
+  envoy.set("YACWU_INSECURE_SKIP_AUTH", "true")
+  assert !auth.insecure_skip_auth()
+  envoy.set("YACWU_INSECURE_SKIP_AUTH", "1")
+  assert auth.insecure_skip_auth()
+  envoy.unset("YACWU_INSECURE_SKIP_AUTH")
+}

@@ -101,7 +101,9 @@ fn monotonic_ms() -> Int {
 /// A valid session cookie or a valid forward-auth header admits the request.
 /// Otherwise, when OAuth is configured, browsers are sent through the login
 /// flow (API callers get a plain 401); with forward auth alone the original
-/// 401/403 denials apply; with neither configured everything is open.
+/// 401/403 denials apply. With neither configured the server fails closed:
+/// every request is refused unless `YACWU_INSECURE_SKIP_AUTH=1` explicitly
+/// opts into running open.
 fn gate(req: Request(Connection)) -> Result(Nil, Response(ResponseData)) {
   let oauth_config = oauth.load()
   case request.path_segments(req), oauth_config {
@@ -130,7 +132,17 @@ fn gate(req: Request(Connection)) -> Result(Nil, Response(ResponseData)) {
             _, _, Some(_) -> Error(login_required(req))
             [_, ..], Error(denial), None ->
               Error(text_response(denial.status, denial.message))
-            [], _, None -> Ok(Nil)
+            [], _, None ->
+              case auth.insecure_skip_auth() {
+                True -> Ok(Nil)
+                False ->
+                  Error(text_response(
+                    403,
+                    "no authentication configured — set YACWU_REMOTE_USERS "
+                      <> "(forward auth), YACWU_OAUTH_* (built-in OAuth), or "
+                      <> "YACWU_INSECURE_SKIP_AUTH=1 to run without auth",
+                  ))
+              }
           }
         }
       }
