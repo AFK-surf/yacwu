@@ -12,8 +12,8 @@ import gleam/otp/static_supervisor as supervisor
 import gleam/result
 import mist
 import yacwu/auth
-import yacwu/codex
 import yacwu/config
+import yacwu/hosts
 import yacwu/model_state
 import yacwu/profiles
 import yacwu/router
@@ -72,19 +72,19 @@ authentication (e.g. bound to localhost only).",
     }
   }
 
-  let codex_name = process.new_name("yacwu_codex")
+  let registry_name = process.new_name("yacwu_hosts")
   let store_name = process.new_name("yacwu_models")
   let profile_store_name = process.new_name("yacwu_profiles")
   let assert Ok(_) =
     supervisor.new(supervisor.OneForOne)
-    |> supervisor.add(codex.supervised(codex_name))
+    |> supervisor.add(hosts.supervised(registry_name))
     |> supervisor.add(model_state.supervised(store_name))
     |> supervisor.add(profiles.supervised(profile_store_name))
     |> supervisor.start
 
   let ctx =
     router.Context(
-      codex: codex_name,
+      registry: registry_name,
       store: store_name,
       profile_store: profile_store_name,
       static_dir: conf.static_dir,

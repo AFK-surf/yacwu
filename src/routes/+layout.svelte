@@ -8,6 +8,10 @@
 	import { goto } from '$app/navigation';
 	import {
 		currentContextTokens,
+		hostQuery,
+		isRemoteHost,
+		LOCAL_HOST,
+		type HostInfo,
 		type JsonRpcNotification,
 		type ThreadItem,
 		type ThreadSummary,
@@ -87,6 +91,12 @@
 	let localCounter = 0;
 
 	let sessions = $state<ThreadSummary[]>([]);
+	// Host picker: local plus the remote machines found in ~/.ssh/config.
+	let newHost = $state(LOCAL_HOST);
+	let hostChoices = $state<HostInfo[]>([]);
+	// Live connection state per remote host, fed by yacwu/host/status events.
+	let hostStates = $state<Record<string, string>>({});
+	let hostDefaultCwds = $state<Record<string, string>>({});
 	let sessionsLoaded = $state(false);
 	let threads = $state<Record<string, ThreadState>>({});
 	let sessionConfigs = $state<Record<string, { model: string; effort: string; profile: string | null }>>({});
@@ -140,6 +150,11 @@
 	const active = $derived(activeId ? threads[activeId] : null);
 	const activeSummary = $derived(sessions.find((s) => s.id === activeId) ?? null);
 	const activeConfig = $derived(activeId ? sessionConfigs[activeId] : null);
+	const activeHost = $derived(activeId ? sessionHost(activeId) : LOCAL_HOST);
+	const activeRemote = $derived(isRemoteHost(activeHost));
+	const activeHostState = $derived(
+		activeRemote ? (hostStates[activeHost] ?? 'connected') : 'connected'
+	);
 	// Side chats (ephemeral /btw forks) nest under their parent in the sidebar.
 	// Orphans — whose parent was archived or isn't listed — stay top-level so
 	// they remain reachable.
@@ -253,6 +268,23 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		}
 	}
 
+	/** The host a session runs on: its summary's tag, the URL hint, or local. */
+	function sessionHost(id: string | null): string {
+		if (!id) return LOCAL_HOST;
+		const summary = sessions.find((s) => s.id === id);
+		if (summary?.host) return summary.host;
+		if (page.params.id === id) {
+			const hinted = page.url.searchParams.get('host');
+			if (hinted) return hinted;
+		}
+		return LOCAL_HOST;
+	}
+
+	/** Thread API URL carrying the session's host as a routing hint. */
+	function threadApi(id: string, path = ''): string {
+		return `/api/threads/${id}${path}${hostQuery(sessionHost(id))}`;
+	}
+
 	function upsertSession(thr: any) {
 		if (!thr?.id) return;
 		if (thr.cwd) cwds[thr.id] = thr.cwd;
@@ -268,7 +300,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			updatedAt: thr.updatedAt ?? thr.createdAt ?? existing?.updatedAt ?? now,
 			cwd: thr.cwd,
 			forkedFromId: thr.forkedFromId ?? existing?.forkedFromId ?? null,
-			ephemeral: thr.ephemeral ?? existing?.ephemeral ?? false
+			ephemeral: thr.ephemeral ?? existing?.ephemeral ?? false,
+			host: thr.host ?? existing?.host ?? undefined
 		};
 		sessions = [summary, ...sessions.filter((s) => s.id !== thr.id)];
 	}
@@ -329,6 +362,21 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		const shouldScroll = affectedThreadId === activeId && isTranscriptAtBottom();
 
 		switch (msg.method) {
+			case 'yacwu/host/status': {
+				const host = String(p.host ?? '');
+				if (!host) break;
+				const previous = hostStates[host];
+				hostStates[host] = String(p.state ?? 'disconnected');
+				// A host coming back means notifications were missed while it was
+				// away: refresh the rail and resync the open transcript from
+				// thread/read, the reconciliation source of truth.
+				if (hostStates[host] === 'connected' && previous && previous !== 'connected') {
+					void loadSessions();
+					if (activeId && sessionHost(activeId) === host) void openSession(activeId, false);
+				}
+				break;
+			}
+
 			case 'thread/started': {
 				const thr = p.thread;
 				if (thr?.id) {
@@ -598,7 +646,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		createError = null;
 		newCwd = '';
 		newProfile = '';
+		newHost = LOCAL_HOST;
 		creating = true;
+		// Hosts come from ~/.ssh/config, re-read by the backend on demand.
+		fetch('/api/hosts')
+			.then((r) => r.json())
+			.then((d) => {
+				hostChoices = (d.hosts ?? []) as HostInfo[];
+				for (const h of hostChoices) {
+					if (h.kind === 'remote' && !(h.name in hostStates)) hostStates[h.name] = h.state;
+				}
+			})
+			.catch(() => (hostChoices = []));
 		// The create form lives in the session rail; surface it if it's hidden
 		// (welcome-screen CTA on mobile, or desktop with the rail collapsed).
 		if (mobileViewport) {
@@ -676,13 +735,50 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		}
 	}
 
+	/**
+	 * Connect to a remote host and pull its sessions into the rail (plus its
+	 * default working directory for the create form). Triggered by picking a
+	 * host — the connection may take a few seconds while ssh bootstraps the
+	 * remote app-server; state updates arrive over the event stream.
+	 */
+	async function loadHostSessions(host: string) {
+		try {
+			const res = await fetch(`/api/threads${hostQuery(host)}`);
+			const data = await res.json();
+			if (!res.ok) {
+				if (newHost === host) createError = data.error ?? `could not reach ${host}`;
+				return;
+			}
+			if (newHost === host) createError = null;
+			hostDefaultCwds[host] = data.defaultCwd ?? '';
+			const fetched: ThreadSummary[] = data.data ?? [];
+			const others = sessions.filter((s) => !fetched.some((f) => f.id === s.id));
+			sessions = [...others, ...fetched];
+		} catch {
+			if (newHost === host) createError = `could not reach ${host}`;
+		}
+	}
+
+	function onNewHostChange() {
+		createError = null;
+		if (isRemoteHost(newHost) && hostDefaultCwds[newHost] === undefined) {
+			void loadHostSessions(newHost);
+		}
+	}
+
 	async function newSession(cwd?: string) {
 		createError = null;
 		const profile = newProfile.trim();
+		const host = newHost;
+		const remote = isRemoteHost(host);
 		const res = await fetch('/api/threads', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ ...(cwd ? { cwd } : {}), ...(profile ? { profile } : {}) })
+			body: JSON.stringify({
+				...(cwd ? { cwd } : {}),
+				...(profile && !remote ? { profile } : {}),
+				...(remote ? { host } : {})
+			})
 		});
 		const data = await res.json();
 		if (!res.ok) {
@@ -693,9 +789,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		const id = data.thread?.id;
 		if (id) {
 			ensureThread(id);
-			upsertSession(data.thread);
+			upsertSession({ ...data.thread, host: data.host ?? host });
 			setFastSession(id, data.serviceTier === 'priority');
-			goto(`/s/${id}`);
+			goto(`/s/${id}${hostQuery(data.host ?? host)}`);
 			mobileSidebarOpen = false;
 		}
 	}
@@ -724,11 +820,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	async function loadSessionConfig(id: string) {
 		const previous = sessionConfigs[id];
 		const [modelResult, profileResult] = await Promise.allSettled([
-			fetch(`/api/threads/${id}/model`).then(async (res) => {
+			fetch(threadApi(id, '/model')).then(async (res) => {
 				if (!res.ok) throw new Error('model settings unavailable');
 				return (await res.json()) as ModelState;
 			}),
-			fetch(`/api/threads/${id}/profile`).then(async (res) => {
+			fetch(threadApi(id, '/profile')).then(async (res) => {
 				if (!res.ok) throw new Error('profile unavailable');
 				return (await res.json()) as { profile?: string | null };
 			})
@@ -746,7 +842,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	async function openSession(id: string, force: boolean) {
 		loadingHistory = true;
 		try {
-			const res = await fetch(`/api/threads/${id}/open`, {
+			const res = await fetch(threadApi(id, '/open'), {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
 				body: JSON.stringify({ force })
@@ -766,7 +862,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			// the user has already run slash commands in this session.
 			if (thr) replaceItems(id, thr.turns ?? []);
 			// Surface any persisted goal for this session.
-			fetch(`/api/threads/${id}/goal`)
+			fetch(threadApi(id, '/goal'))
 				.then((r) => r.json())
 				.then((g) => {
 					ensureThread(id).goal = (g?.goal ?? null) as Goal | null;
@@ -800,10 +896,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			const body = new FormData();
 			body.set('text', text);
 			for (const image of images) body.append('images', image, image.name);
-			return fetch(`/api/threads/${id}/message`, { method: 'POST', body });
+			return fetch(threadApi(id, '/message'), { method: 'POST', body });
 		}
 
-		return fetch(`/api/threads/${id}/message`, {
+		return fetch(threadApi(id, '/message'), {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({ text })
@@ -919,10 +1015,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		lines.push(`  session   ${id}`);
 		const cwd = cwds[id] ?? sess?.cwd;
 		if (cwd) lines.push(`  cwd       ${cwd}`);
+		const host = sessionHost(id);
+		if (isRemoteHost(host)) {
+			lines.push(`  host      ${host} (${hostStates[host] ?? 'connected'})`);
+		}
 		lines.push(`  state     ${t?.status ?? 'idle'}`);
 		lines.push(`  fast      ${fastSessions[id] ? 'on' : 'off'}`);
 		try {
-			const res = await fetch(`/api/threads/${id}/model`);
+			const res = await fetch(threadApi(id, '/model'));
 			const settings = (await res.json()) as Partial<ModelState> & { error?: string };
 			if (!res.ok) throw new Error(settings.error ?? 'model settings unavailable');
 			if (settings.model) lines.push(`  model     ${settings.model}`);
@@ -932,7 +1032,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			lines.push('  effort    unavailable');
 		}
 		try {
-			const res = await fetch(`/api/threads/${id}/profile`);
+			const res = await fetch(threadApi(id, '/profile'));
 			const data = await res.json();
 			if (res.ok && data.profile) lines.push(`  profile   ${data.profile}`);
 		} catch {
@@ -948,7 +1048,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		}
 		if (t?.goal) lines.push(`  goal      ${t.goal.objective} (${t.goal.status})`);
 		try {
-			const acc = await (await fetch('/api/account')).json();
+			const acc = await (await fetch(`/api/account${hostQuery(sessionHost(id))}`)).json();
 			const a = acc.account;
 			if (a) lines.push(`  account   ${a.email ?? a.type}${a.planType ? ` · ${a.planType}` : ''}`);
 			for (const win of [acc.rateLimits?.primary, acc.rateLimits?.secondary]) {
@@ -977,7 +1077,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	async function postCmd(id: string, path: string, body: unknown): Promise<any> {
-		const res = await fetch(`/api/threads/${id}/${path}`, {
+		const res = await fetch(threadApi(id, `/${path}`), {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify(body ?? {})
@@ -1012,7 +1112,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 			case 'model-show': {
 				try {
-					const res = await fetch(`/api/threads/${id}/model`);
+					const res = await fetch(threadApi(id, '/model'));
 					const data = await res.json();
 					if (res.ok) {
 						const settings = data as ModelState;
@@ -1055,7 +1155,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 			case 'profile-show': {
 				try {
-					const res = await fetch(`/api/threads/${id}/profile`);
+					const res = await fetch(threadApi(id, '/profile'));
 					const data = await res.json();
 					if (!res.ok) throw new Error(data.error);
 					const lines = [`profile: ${data.profile ?? '(base config)'}`];
@@ -1101,7 +1201,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			case 'goal-show': {
 				let g = threads[id]?.goal;
 				try {
-					const res = await fetch(`/api/threads/${id}/goal`);
+					const res = await fetch(threadApi(id, '/goal'));
 					const data = await res.json();
 					if (res.ok) {
 						g = (data.goal ?? null) as Goal | null;
@@ -1185,10 +1285,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			case 'fork': {
 				const { ok, data } = await postCmd(id, 'fork', {});
 				if (ok && data.thread?.id) {
-					upsertSession(data.thread);
+					upsertSession({ ...data.thread, host: data.host ?? sessionHost(id) });
 					ensureThread(data.thread.id);
 					addLocalNote(id, `forked into ${data.thread.id.slice(0, 8)}`);
-					goto(`/s/${data.thread.id}`);
+					goto(`/s/${data.thread.id}${hostQuery(data.host ?? sessionHost(id))}`);
 				} else {
 					addLocalNote(id, data.error ?? 'failed to fork session', 'err');
 				}
@@ -1210,7 +1310,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				}
 				const sideId: string = data.thread.id;
 				sessionStorage.setItem(sideParentKey(sideId), id);
-				upsertSession({ ...data.thread, forkedFromId: id, ephemeral: true });
+				upsertSession({
+					...data.thread,
+					forkedFromId: id,
+					ephemeral: true,
+					host: data.host ?? sessionHost(id)
+				});
 				ensureThread(sideId);
 				addLocalNote(id, `side conversation started: ${sideId.slice(0, 8)}`);
 				if (parsed.message) {
@@ -1223,7 +1328,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						addLocalNote(sideId, err.error ?? 'failed to send message', 'err');
 					}
 				}
-				goto(`/s/${sideId}`);
+				goto(`/s/${sideId}${hostQuery(data.host ?? sessionHost(id))}`);
 				break;
 			}
 
@@ -1256,7 +1361,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	async function interrupt() {
 		if (!activeId) return;
 		const t = threads[activeId];
-		await fetch(`/api/threads/${activeId}/interrupt`, {
+		await fetch(threadApi(activeId, '/interrupt'), {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({ turnId: t?.turnId })
@@ -1297,7 +1402,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			config: sessionConfigs[id],
 			cwd: cwds[id]
 		};
-		const res = await fetch(`/api/threads/${id}/archive`, {
+		const res = await fetch(threadApi(id, '/archive'), {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({})
@@ -1315,7 +1420,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	async function closeSideChat(
 		session: ThreadSummary
 	): Promise<{ ok: true } | { ok: false; error?: string }> {
-		const res = await fetch(`/api/threads/${session.id}/unsubscribe`, {
+		const res = await fetch(threadApi(session.id, '/unsubscribe'), {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({})
@@ -1338,7 +1443,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		if (!snapshot) return;
 		if (archiveNoticeTimer) clearTimeout(archiveNoticeTimer);
 		archiveNoticeTimer = null;
-		const res = await fetch(`/api/threads/${snapshot.id}/unarchive`, {
+		const res = await fetch(threadApi(snapshot.id, '/unarchive'), {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({})
@@ -2216,6 +2321,21 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					<h2 id="create-title">Start a session</h2>
 					<button class="mini ghost" onclick={cancelCreating}>Cancel</button>
 				</div>
+				{#if hostChoices.length > 1}
+					<div class="create-row">
+						<label for="new-host">Machine</label>
+						<select id="new-host" class="profile-input" bind:value={newHost} onchange={onNewHostChange}>
+							{#each hostChoices as h (h.name)}
+								<option value={h.name}>
+									{h.name === LOCAL_HOST ? 'This machine' : h.name}{h.kind === 'remote' &&
+									(hostStates[h.name] ?? h.state) !== 'disconnected'
+										? ` · ${hostStates[h.name] ?? h.state}`
+										: ''}
+								</option>
+							{/each}
+						</select>
+					</div>
+				{/if}
 				<div class="create-row">
 					<label for="new-cwd">Working directory</label>
 					<input
@@ -2224,7 +2344,8 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						bind:this={cwdInputEl}
 						bind:value={newCwd}
 						onkeydown={onCwdKeydown}
-						placeholder={defaultCwd || '/path/to/project'}
+						placeholder={(isRemoteHost(newHost) ? hostDefaultCwds[newHost] : defaultCwd) ||
+							'/path/to/project'}
 						aria-invalid={Boolean(createError)}
 						aria-describedby="create-helper"
 						spellcheck="false"
@@ -2232,7 +2353,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						autocomplete="off"
 					/>
 				</div>
-				{#if profileChoices.length > 0}
+				{#if profileChoices.length > 0 && !isRemoteHost(newHost)}
 					<div class="create-row">
 						<label for="new-profile">Profile</label>
 						<select id="new-profile" class="profile-input" bind:value={newProfile}>
@@ -2270,7 +2391,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						class="session"
 						class:active={s.id === activeId}
 						data-id={s.id}
-						href={`/s/${s.id}`}
+						href={`/s/${s.id}${hostQuery(s.host)}`}
 						onclick={() => closeSidebar(false)}
 					>
 						<span
@@ -2282,6 +2403,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							title={threads[s.id]?.error ? 'Error' : threads[s.id]?.status === 'running' ? 'Running' : 'Idle'}
 						></span>
 						<span class="label">{#if isSideChat(s)}⎇ {/if}{shortLabel(s)}</span>
+						{#if isRemoteHost(s.host)}
+							<span class="host-badge" title={`Runs on ${s.host}`}>{s.host}</span>
+						{/if}
 						{#if fastSessions[s.id]}{@render fastMark()}{/if}
 					</a>
 					<button
@@ -2302,7 +2426,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							class="session side"
 							class:active={side.id === activeId}
 							data-id={side.id}
-							href={`/s/${side.id}`}
+							href={`/s/${side.id}${hostQuery(side.host)}`}
 							onclick={() => closeSidebar(false)}
 						>
 							<span
@@ -2406,6 +2530,17 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				</div>
 				<div class="session-facts" aria-label="session configuration">
 					{#if fastSessions[activeId]}{@render fastMark()}{/if}
+					{#if activeRemote}
+						<span
+							class="fact host"
+							class:degraded={activeHostState !== 'connected'}
+							title={activeHostState === 'connected'
+								? `Session runs on ${activeHost}`
+								: `Connection to ${activeHost} interrupted — the remote session keeps running; reconnecting`}
+						>
+							{activeHost}{activeHostState === 'connected' ? '' : ` · ${activeHostState}`}
+						</span>
+					{/if}
 					{#if activeConfig?.model}
 						<span class="fact model" title={`Model ${activeConfig.model}, ${activeConfig.effort} reasoning`}>
 							{activeConfig.model}<span class="fact-detail">/{activeConfig.effort}</span>
@@ -2419,6 +2554,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					{/if}
 				</div>
 				<div class="session-state">
+					{#if !activeRemote}
 					<button
 						class="files-trigger"
 						type="button"
@@ -2432,6 +2568,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							<path d="M3.5 6.5a1.5 1.5 0 0 1 1.5-1.5h4l2 2.5h8a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5z" />
 						</svg>
 					</button>
+					{/if}
 					<button
 						class="session-info-trigger"
 						type="button"
@@ -2903,7 +3040,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							multiple
 							onchange={onImagesSelected}
 						/>
-						<button class="attach" type="button" onclick={chooseImages} title="Attach images" aria-label="Attach images">
+						<button
+							class="attach"
+							type="button"
+							onclick={chooseImages}
+							disabled={activeRemote}
+							title={activeRemote ? 'Image attachments are not yet supported for remote sessions' : 'Attach images'}
+							aria-label="Attach images"
+						>
 							<svg class="control-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
 								<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
 							</svg>
@@ -3429,8 +3573,18 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		fill: currentColor;
 	}
 
-	.session .fast-mark {
-		grid-column: 3;
+	.session .host-badge {
+		max-width: 6.5rem;
+		overflow: hidden;
+		padding-inline: var(--space-2xs);
+		border: var(--rule-hair) solid var(--color-rule);
+		border-radius: var(--radius-pill);
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+		line-height: 1.6;
+		color: var(--color-muted);
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	.session-row.side-row .session {
@@ -3669,6 +3823,15 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	.fact.profile {
 		color: var(--color-accent-active);
+	}
+
+	.fact.host {
+		font-family: var(--font-outlier);
+		color: var(--color-muted);
+	}
+
+	.fact.host.degraded {
+		color: var(--color-warning);
 	}
 
 	.topbar .tid,
