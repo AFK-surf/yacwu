@@ -1,9 +1,12 @@
 //// Registry of codex managers, one per host.
 ////
-//// "local" always exists and drives the classic stdio child. Remote hosts
-//// come from ~/.ssh/config (see `ssh_config`) and get a manager started
-//// lazily the first time something addresses them — starting a manager is
-//// cheap and does not connect; the connection happens on its first request.
+//// "local" always exists and drives the classic stdio child. Alternative
+//// local backends (see `backends`) live alongside it: their managers also
+//// start eagerly, each driving its own stdio child on this machine. Remote
+//// hosts come from ~/.ssh/config (see `ssh_config`) and get a manager
+//// started lazily the first time something addresses them — starting a
+//// manager is cheap and does not connect; the connection happens on its
+//// first request.
 ////
 //// The registry also keeps the thread→host routing map, rebuilt at runtime
 //// from thread listings and creations (yacwu stores nothing on disk), so
@@ -17,10 +20,19 @@ import gleam/option.{type Option, Some}
 import gleam/otp/actor
 import gleam/otp/supervision
 import gleam/result
+import yacwu/backends
 import yacwu/codex.{type Codex}
 import yacwu/ssh_config
 
 pub const local = "local"
+
+/// Whether `host` runs its app-server as a child on this machine: "local"
+/// itself, or a configured alternative backend. Local hosts share yacwu's
+/// filesystem (file browser, git, uploads, in-use detection) and never show
+/// as unreachable — their child spawns on demand.
+pub fn is_local(host: String) -> Bool {
+  host == local || result.is_ok(backends.command(host))
+}
 
 pub opaque type Msg {
   Resolve(
@@ -146,11 +158,19 @@ fn start(name: Registry) -> actor.StartResult(Subject(Msg)) {
         threads: dict.new(),
         subscribers: [],
       )
-    // The local manager always exists.
-    let state = case start_manager(state, local) {
-      Ok(#(state, _)) -> state
-      Error(_) -> state
-    }
+    // The local manager always exists, and configured backends start with
+    // it so their sessions appear in the merged thread rail.
+    let state =
+      list.fold(
+        [local, ..list.map(backends.discover(), fn(b) { b.name })],
+        state,
+        fn(state, host) {
+          case start_manager(state, host) {
+            Ok(#(state, _)) -> state
+            Error(_) -> state
+          }
+        },
+      )
     state
     |> actor.initialised
     |> actor.selecting(selector)
@@ -229,7 +249,8 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
 }
 
 /// Look up a host's manager, starting it if this is the first time the host
-/// is addressed. Unknown hosts (not "local", not in ~/.ssh/config) error.
+/// is addressed. Unknown hosts (not "local", not a configured backend, not
+/// in ~/.ssh/config) error.
 fn ensure_manager(
   state: State,
   host: String,
@@ -237,7 +258,7 @@ fn ensure_manager(
   case dict.get(state.managers, host) {
     Ok(manager) -> Ok(#(state, manager.0))
     Error(_) ->
-      case host == local || list.contains(ssh_config.discover(), host) {
+      case is_local(host) || list.contains(ssh_config.discover(), host) {
         False -> Error("unknown host: " <> host)
         True -> start_manager(state, host)
       }
@@ -255,9 +276,10 @@ fn start_manager(
       #(State(..state, names: dict.insert(state.names, host, name)), name)
     }
   }
-  let transport = case host == local {
-    True -> codex.Local
-    False -> codex.Ssh(host)
+  let transport = case host == local, backends.command(host) {
+    True, _ -> codex.Local(codex.default_command)
+    False, Ok(command) -> codex.Local(command)
+    False, Error(_) -> codex.Ssh(host)
   }
   case codex.start(name, host, transport) {
     Error(_) -> Error("could not start the manager for " <> host)
