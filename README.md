@@ -16,6 +16,10 @@ state lives entirely in Codex's own persistent sessions, read back via
 - 🔒 In-use detection: warns before opening a session another codex instance
   already has loaded (so two processes don't corrupt one conversation)
 - ⚡ Live streaming of agent messages, reasoning, command runs, file changes & plans
+- 🤝 Multi-agent visibility: sub-agents spawned by a session appear as
+  link-style buttons in the header (max 5, more behind a menu; inside
+  Session details on mobile), each opening that agent's live transcript
+  read-only
 - ⌨️ Slash commands mirroring the Codex TUI (see below)
 - ⌨️ Up/Down message history in the composer, with the Codex TUI's shell-style
   recall semantics (a resumed thread seeds history from its prior prompts)

@@ -17,6 +17,16 @@
 		type ThreadSummary,
 		type Turn
 	} from '$lib/protocol';
+	import {
+		agentLabel,
+		agentRootId,
+		agentsForSession,
+		isSubAgentThread,
+		mergeAgentThreadMeta,
+		trackAgentItem,
+		type AgentInfo,
+		type AgentRegistry
+	} from '$lib/agents';
 	import { parseSlash, SLASH_HELP, filterSlashCommands, type SlashCommandInfo } from '$lib/slash';
 	import { ComposerHistory } from '$lib/history';
 	import FileBrowser from '$lib/FileBrowser.svelte';
@@ -128,6 +138,12 @@
 	// Reasoning efforts offered by the active session's model (thread /model).
 	let modelEfforts = $state<Record<string, string[]>>({});
 	let effortPending = $state(false);
+	// Sub-agent threads spawned by sessions (multi-agent collaboration).
+	let agents = $state<AgentRegistry>({});
+	let agentMenuOpen = $state(false);
+	let agentHistoryLoading = $state(false);
+	// Agent threads whose metadata (nickname/role) was already requested.
+	const agentMetaFetched = new Set<string>();
 	let transcriptScrollTop = $state(0);
 	let transcriptViewportHeight = $state(0);
 	let transcriptHeightVersion = $state(0);
@@ -171,6 +187,35 @@
 	const activeParent = $derived(
 		activeIsSide ? (sessions.find((s) => s.id === activeSummary?.forkedFromId) ?? null) : null
 	);
+	// Sub-agents of the active session, in spawn order. Selecting one (via the
+	// ?agent= query param) shows its transcript read-only; the session itself
+	// stays the URL's identity, so the rail selection never moves.
+	const activeAgents = $derived(activeId ? agentsForSession(agents, activeId) : []);
+	const viewedAgentId = $derived(activeId ? page.url.searchParams.get('agent') : null);
+	const viewedId = $derived(viewedAgentId ?? activeId);
+	const viewed = $derived(viewedId ? (threads[viewedId] ?? null) : null);
+	const viewedAgent = $derived(viewedAgentId ? (agents[viewedAgentId] ?? null) : null);
+	// The header shows at most 5 agents; the rest live behind a menu. Running
+	// agents take the visible slots first (spawn order within each group),
+	// and a selected agent from the overflow swaps into the last visible slot
+	// so the current-location mark is always in view.
+	const AGENT_ROW_MAX = 5;
+	const headerAgents = $derived.by(() => {
+		if (activeAgents.length <= AGENT_ROW_MAX) return { visible: activeAgents, overflow: [] };
+		const ranked = [
+			...activeAgents.filter((agent) => agentIsRunning(agent)),
+			...activeAgents.filter((agent) => !agentIsRunning(agent))
+		];
+		const visible = ranked.slice(0, AGENT_ROW_MAX);
+		const overflow = ranked.slice(AGENT_ROW_MAX);
+		const selected = overflow.findIndex((agent) => agent.id === viewedAgentId);
+		if (selected >= 0) {
+			const swap = visible[AGENT_ROW_MAX - 1];
+			visible[AGENT_ROW_MAX - 1] = overflow[selected];
+			overflow[selected] = swap;
+		}
+		return { visible, overflow };
+	});
 	// Slash-command autocomplete: offered while the composer holds a bare
 	// command token ("/…" with no whitespace or newline yet), mirroring the
 	// codex TUI's command popup. Esc hides it until the token changes.
@@ -221,9 +266,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	let cwdInputEl = $state<HTMLInputElement | null>(null);
 
 	let transcriptEl = $state<HTMLDivElement | null>(null);
-	const activeItems = $derived(itemsOf(active).filter(isRenderableTranscriptItem));
+	// The transcript renders whichever thread is in view: the session itself,
+	// or a selected sub-agent's thread.
+	const viewedItems = $derived(itemsOf(viewed).filter(isRenderableTranscriptItem));
 	const virtualTranscript = $derived(
-		virtualizeItems(activeItems, transcriptScrollTop, transcriptViewportHeight, transcriptHeightVersion)
+		virtualizeItems(viewedItems, transcriptScrollTop, transcriptViewportHeight, transcriptHeightVersion)
 	);
 
 	function ensureThread(id: string): ThreadState {
@@ -259,6 +306,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			next._at = Date.now();
 		}
 		t.byId[item.id] = next;
+		// Collaboration items reveal sub-agent threads; keep the registry live
+		// for both streamed items and restored history.
+		if (next.type === 'collabAgentToolCall' || next.type === 'subAgentActivity') {
+			trackAgentItem(agents, id, next);
+		}
 	}
 
 	function replaceItems(id: string, turns: Turn[]) {
@@ -322,6 +374,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 
 	function removeSession(id: string) {
 		sessions = sessions.filter((s) => s.id !== id);
+		for (const agent of Object.values(agents)) {
+			if (agentRootId(agents, agent) === id) {
+				delete agents[agent.id];
+				delete threads[agent.id];
+			}
+		}
 		delete threads[id];
 		delete sessionConfigs[id];
 		delete fastSessions[id];
@@ -363,7 +421,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		const p: any = msg.params ?? {};
 		const tid: string | undefined = p.threadId;
 		const affectedThreadId: string | undefined = tid ?? p.thread?.id;
-		const shouldScroll = affectedThreadId === activeId && isTranscriptAtBottom();
+		const shouldScroll = affectedThreadId === viewedId && isTranscriptAtBottom();
 
 		switch (msg.method) {
 			case 'yacwu/host/status': {
@@ -385,7 +443,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				const thr = p.thread;
 				if (thr?.id) {
 					ensureThread(thr.id);
-					upsertSession(thr);
+					// Sub-agent threads belong to their spawning session, not the
+					// session rail.
+					if (isSubAgentThread(thr)) mergeAgentThreadMeta(agents, thr);
+					else upsertSession(thr);
 				}
 				break;
 			}
@@ -497,7 +558,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		if (shouldScroll) {
 			scrollToBottom();
 		} else if (
-			affectedThreadId === activeId &&
+			affectedThreadId === viewedId &&
 			(msg.method.startsWith('item/') || msg.method.startsWith('turn/'))
 		) {
 			unseenActivity = true;
@@ -521,7 +582,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	function transcriptRowKey(item: ThreadItem): string {
-		return `${activeId ?? 'none'}:${(item as any).id ?? ''}`;
+		return `${viewedId ?? 'none'}:${(item as any).id ?? ''}`;
 	}
 
 	function measuredRowHeight(item: ThreadItem): number {
@@ -621,18 +682,26 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	// Re-attach any still loaded in codex memory to their parent sessions.
 	// Codex only reports forkedFromId in the thread/fork response, so the
 	// parent link is bridged through sessionStorage (same lifetime as the
-	// ephemeral thread: this browser session).
+	// ephemeral thread: this browser session). The same sweep re-discovers
+	// sub-agent threads still loaded from a running collaboration turn —
+	// thread/list defaults to interactive sources and omits them too.
 	async function recoverSideChats() {
 		try {
 			const res = await fetch('/api/threads/loaded');
 			const data = await res.json();
 			const loaded: string[] = data.data ?? [];
-			const missing = loaded.filter((id) => !sessions.some((s) => s.id === id));
+			const missing = loaded.filter(
+				(id) => !sessions.some((s) => s.id === id) && !agents[id]
+			);
 			for (const id of missing) {
 				try {
 					const res = await fetch(`/api/threads/${id}`);
 					const data = await res.json();
 					const thr = data.thread;
+					if (isSubAgentThread(thr)) {
+						mergeAgentThreadMeta(agents, thr);
+						continue;
+					}
 					const parentId = thr?.id ? sessionStorage.getItem(sideParentKey(thr.id)) : null;
 					if (thr?.ephemeral && parentId) {
 						upsertSession({ ...thr, forkedFromId: thr.forkedFromId ?? parentId ?? null });
@@ -711,6 +780,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	function onWindowKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape' && agentMenuOpen) {
+			event.preventDefault();
+			agentMenuOpen = false;
+			return;
+		}
 		if (!mobileViewport || !mobileSidebarOpen) return;
 		if (event.key === 'Escape') {
 			event.preventDefault();
@@ -931,6 +1005,112 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	function dismissConflict() {
 		conflict = null;
 		goto('/');
+	}
+
+	// -- Sub-agent transcripts -------------------------------------------------
+
+	/** Agent-thread API URL. Agents run on their parent session's host. */
+	function agentApi(agentId: string, params: Record<string, string> = {}): string {
+		const query = new URLSearchParams(params);
+		const host = sessionHost(activeId);
+		if (isRemoteHost(host)) query.set('host', host);
+		const qs = query.toString();
+		return `/api/threads/${agentId}${qs ? `?${qs}` : ''}`;
+	}
+
+	/** The /s/<session> URL with the agent selection set or cleared. */
+	function agentHref(agentId: string | null): string {
+		const params = new URLSearchParams(page.url.search);
+		if (agentId) params.set('agent', agentId);
+		else params.delete('agent');
+		const qs = params.toString();
+		return `/s/${activeId}${qs ? `?${qs}` : ''}`;
+	}
+
+	/** Select an agent's transcript; selecting it again returns to the session. */
+	function toggleAgent(agentId: string) {
+		agentMenuOpen = false;
+		goto(agentHref(viewedAgentId === agentId ? null : agentId));
+	}
+
+	/**
+	 * Seed a selected agent's transcript from thread/read. Live events for the
+	 * thread already stream over /api/events; this backfills what happened
+	 * before the page (or the selection) existed. Read-only on purpose: the
+	 * parent turn owns collab agent threads, so they are never resumed here.
+	 */
+	async function loadAgentTranscript(agentId: string) {
+		agentHistoryLoading = true;
+		try {
+			const res = await fetch(agentApi(agentId, { turns: '1' }));
+			const data = await res.json();
+			if (res.ok && data.thread) {
+				if (Array.isArray(data.thread.turns) && data.thread.turns.length > 0) {
+					replaceItems(agentId, data.thread.turns);
+				}
+				mergeAgentThreadMeta(agents, data.thread, activeId ?? undefined);
+			}
+		} catch {
+			/* keep whatever streamed in live */
+		} finally {
+			agentHistoryLoading = false;
+			scrollToBottom();
+		}
+	}
+
+	/** Fill in nickname/role for agents discovered through collab items only. */
+	async function loadAgentMeta(agentId: string) {
+		try {
+			const res = await fetch(agentApi(agentId));
+			const data = await res.json();
+			if (res.ok && data.thread) mergeAgentThreadMeta(agents, data.thread);
+		} catch {
+			/* label falls back to the agent path or thread id */
+		}
+	}
+
+	// Viewing an agent (including via a pasted URL) registers it and seeds its
+	// transcript once. Only the selection is a reactive dependency.
+	$effect(() => {
+		const agentId = viewedAgentId;
+		const sessionId = activeId;
+		untrack(() => {
+			if (!agentId || !sessionId) return;
+			if (!agents[agentId]) mergeAgentThreadMeta(agents, { id: agentId }, sessionId);
+			if (ensureThread(agentId).order.length === 0) void loadAgentTranscript(agentId);
+			else scrollToBottom();
+		});
+	});
+
+	// Agents surfaced by collab items carry no nickname/role; read each such
+	// thread's metadata once so header buttons get their proper labels.
+	$effect(() => {
+		const pending = activeAgents.filter(
+			(agent) => !agent.nickname && !agentMetaFetched.has(agent.id)
+		);
+		if (pending.length === 0) return;
+		untrack(() => {
+			for (const agent of pending) {
+				agentMetaFetched.add(agent.id);
+				void loadAgentMeta(agent.id);
+			}
+		});
+	});
+
+	function agentIsRunning(agent: AgentInfo): boolean {
+		if (agent.closed) return false;
+		return threads[agent.id]?.status === 'running' || agent.state === 'running';
+	}
+
+	function agentStateLabel(agent: AgentInfo): string {
+		if (agentIsRunning(agent)) return 'running';
+		if (agent.closed) return 'closed';
+		return agent.state ?? 'idle';
+	}
+
+	function agentTitle(agent: AgentInfo): string {
+		const role = agent.role ? ` [${agent.role}]` : '';
+		return `Agent ${agentLabel(agent)}${role} · ${agentStateLabel(agent)} · ${agent.id.slice(0, 8)}`;
 	}
 
 	function isFailedFetch(err: unknown): boolean {
@@ -1948,7 +2128,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	function agentRawKey(item: any): string {
-		return `${activeId ?? 'none'}:${String(item.id ?? '')}`;
+		return `${viewedId ?? 'none'}:${String(item.id ?? '')}`;
 	}
 
 	function toggleAgentRaw(item: any) {
@@ -1973,13 +2153,14 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	function onWindowClick(e: MouseEvent) {
-		if (hoverPointer || tappedAgentKey === null) return;
 		const target = e.target as Element | null;
+		if (agentMenuOpen && !target?.closest?.('.agent-overflow')) agentMenuOpen = false;
+		if (hoverPointer || tappedAgentKey === null) return;
 		if (!target?.closest?.('.item.agent')) tappedAgentKey = null;
 	}
 
 	function commandOutputStateKey(item: any): string {
-		return `${activeId ?? 'none'}:${String(item.id ?? '')}`;
+		return `${viewedId ?? 'none'}:${String(item.id ?? '')}`;
 	}
 
 	function commandOutputIsExpanded(item: any, output: string): boolean {
@@ -2582,6 +2763,56 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							<span class="meta-sep" aria-hidden="true">·</span>
 							<span class="meta cwd" title={cwds[activeId] ?? activeSummary?.cwd}>{cwds[activeId] ?? activeSummary?.cwd}</span>
 						{/if}
+						{#if activeAgents.length > 0}
+							<nav class="agent-row" aria-label="Agent transcripts">
+								{#each headerAgents.visible as agent (agent.id)}
+									<button
+										type="button"
+										class="agent-link"
+										class:current={agent.id === viewedAgentId}
+										class:closed={agent.closed}
+										aria-current={agent.id === viewedAgentId ? 'true' : undefined}
+										title={agentTitle(agent)}
+										onclick={() => toggleAgent(agent.id)}
+									>
+										<span class="agent-dot" class:running={agentIsRunning(agent)} aria-hidden="true"></span>{agentLabel(agent)}
+									</button>
+								{/each}
+								{#if headerAgents.overflow.length > 0}
+									<div class="agent-overflow">
+										<button
+											type="button"
+											class="agent-link agent-more"
+											aria-haspopup="menu"
+											aria-expanded={agentMenuOpen}
+											aria-label={`Show ${headerAgents.overflow.length} more agents`}
+											onclick={() => (agentMenuOpen = !agentMenuOpen)}
+										>
+											+{headerAgents.overflow.length} more
+										</button>
+										{#if agentMenuOpen}
+											<div class="agent-menu" role="menu" aria-label="More agents">
+												{#each headerAgents.overflow as agent (agent.id)}
+													<button
+														type="button"
+														role="menuitem"
+														class="agent-menu-item"
+														class:current={agent.id === viewedAgentId}
+														class:closed={agent.closed}
+														title={agentTitle(agent)}
+														onclick={() => toggleAgent(agent.id)}
+													>
+														<span class="agent-dot" class:running={agentIsRunning(agent)} aria-hidden="true"></span>
+														<span class="agent-menu-name">{agentLabel(agent)}{#if agent.role}&nbsp;<span class="agent-menu-role">[{agent.role}]</span>{/if}</span>
+														<span class="agent-menu-state">{agentStateLabel(agent)}</span>
+													</button>
+												{/each}
+											</div>
+										{/if}
+									</div>
+								{/if}
+							</nav>
+						{/if}
 					</div>
 				</div>
 				<div class="session-facts" aria-label="session configuration">
@@ -2742,6 +2973,31 @@ Do not modify files, source, git state, permissions, configuration, or any other
 							</div>
 						{/if}
 					</dl>
+					{#if activeAgents.length > 0}
+						<div class="session-info-agents">
+							<h3 id="session-info-agents-title">Agents</h3>
+							<div class="session-info-agent-list" role="group" aria-labelledby="session-info-agents-title">
+								{#each activeAgents as agent (agent.id)}
+									<button
+										type="button"
+										class="session-info-agent"
+										class:current={agent.id === viewedAgentId}
+										class:closed={agent.closed}
+										aria-current={agent.id === viewedAgentId ? 'true' : undefined}
+										title={agentTitle(agent)}
+										onclick={() => {
+											sessionInfoDialog?.close();
+											toggleAgent(agent.id);
+										}}
+									>
+										<span class="agent-dot" class:running={agentIsRunning(agent)} aria-hidden="true"></span>
+										<span class="session-info-agent-name">{agentLabel(agent)}{#if agent.role}&nbsp;<span class="agent-menu-role">[{agent.role}]</span>{/if}</span>
+										<span class="session-info-agent-state">{agentStateLabel(agent)}</span>
+									</button>
+								{/each}
+							</div>
+						</div>
+					{/if}
 				</div>
 			</dialog>
 
@@ -2798,17 +3054,26 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				</div>
 			{:else}
 				<div class="transcript" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
-					{#if loadingHistory}
+					{#if viewedAgentId ? agentHistoryLoading : loadingHistory}
 						<div class="sys">loading history…</div>
-					{:else if activeItems.length === 0 && active?.status !== 'running' && !active?.error}
-						<div class="transcript-empty">
-							<p class="transcript-empty-lede">This session is ready.</p>
-							<p class="transcript-empty-hint">
-								Describe what you want done in
-								<strong>{workspaceLabel(cwds[activeId] ?? activeSummary?.cwd)}</strong>, or type
-								<code>/</code> for a command.
-							</p>
-						</div>
+					{:else if viewedItems.length === 0 && viewed?.status !== 'running' && !viewed?.error}
+						{#if viewedAgentId}
+							<div class="transcript-empty">
+								<p class="transcript-empty-lede">Nothing from this agent yet.</p>
+								<p class="transcript-empty-hint">
+									Its activity will stream in here as the agent works.
+								</p>
+							</div>
+						{:else}
+							<div class="transcript-empty">
+								<p class="transcript-empty-lede">This session is ready.</p>
+								<p class="transcript-empty-hint">
+									Describe what you want done in
+									<strong>{workspaceLabel(cwds[activeId] ?? activeSummary?.cwd)}</strong>, or type
+									<code>/</code> for a command.
+								</p>
+							</div>
+						{/if}
 					{/if}
 					<div class="transcript-spacer" style={`height: ${virtualTranscript.before}px`}></div>
 					{#each virtualTranscript.items as item (item.id)}
@@ -3023,13 +3288,13 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						</div>
 					{/each}
 					<div class="transcript-spacer" style={`height: ${virtualTranscript.after}px`}></div>
-					{#if active?.status === 'running'}
+					{#if viewed?.status === 'running'}
 						<div class="item agent pending">
 							<div class="body">Working…</div>
 						</div>
 					{/if}
-					{#if active?.error}
-						<div class="item err"><span class="gutter">✗</span><div class="body">{active.error}</div></div>
+					{#if viewed?.error}
+						<div class="item err"><span class="gutter">✗</span><div class="body">{viewed.error}</div></div>
 					{/if}
 				</div>
 				{#if unseenActivity}
@@ -3041,6 +3306,25 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					</div>
 				{/if}
 
+				{#if viewedAgentId}
+					<!-- Collab agent threads are owned by their parent turn; their
+					     transcripts are read-only here, so the composer yields to a
+					     quiet return strip. -->
+					<div class="agent-banner">
+						<span class="agent-banner-label">
+							Agent transcript
+							{#if viewedAgent}
+								· {agentLabel(viewedAgent)}{#if viewedAgent.role}&nbsp;<span class="agent-menu-role">[{viewedAgent.role}]</span>{/if}
+								· {agentStateLabel(viewedAgent)}
+							{/if}
+							· read-only
+						</span>
+						<span class="spacer"></span>
+						<button class="mini ghost" type="button" onclick={() => toggleAgent(viewedAgentId!)}>
+							← Back to session
+						</button>
+					</div>
+				{:else}
 				<div class="composer-shell">
 					<span class="composer-state" aria-live="polite">
 						{selectedImages.length > 0 ? `${selectedImages.length} image${selectedImages.length === 1 ? '' : 's'} attached` : ''}
@@ -3159,6 +3443,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						</div>
 					</div>
 				</div>
+				{/if}
 			{/if}
 		{/if}
 	</main>
@@ -3923,9 +4208,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		color: var(--color-muted);
 	}
 
-	.topbar .cwd {
-		flex: 1 1 auto;
-	}
+	/* The cwd keeps its natural width so the agent row sits right beside it. */
 
 	.session-state {
 		display: flex;
@@ -4120,6 +4403,226 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	.side-banner .meta {
+		color: var(--color-muted);
+	}
+
+	/* Sub-agent transcripts: quiet links in the header meta row. */
+	.agent-row {
+		display: inline-flex;
+		flex-wrap: wrap;
+		gap: var(--space-2xs) var(--space-xs);
+		align-items: center;
+		min-width: 0;
+	}
+
+	.agent-link {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-3xs);
+		max-width: 12rem;
+		padding: 0;
+		overflow: hidden;
+		border: 0;
+		background: transparent;
+		color: var(--color-ink-2);
+		cursor: pointer;
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+		line-height: 1.45;
+		text-decoration-color: transparent;
+		text-decoration-line: underline;
+		text-decoration-thickness: 1px;
+		text-overflow: ellipsis;
+		text-underline-offset: 0.2em;
+		white-space: nowrap;
+		transition:
+			color var(--dur-micro) var(--ease-out),
+			text-decoration-color var(--dur-micro) var(--ease-out);
+	}
+
+	.agent-link:hover,
+	.agent-link:focus-visible {
+		color: var(--color-focus);
+		text-decoration-color: var(--color-accent);
+	}
+
+	.agent-link.current {
+		color: var(--color-accent-active);
+		font-weight: 600;
+		text-decoration-color: var(--color-accent);
+	}
+
+	.agent-link.closed {
+		color: var(--color-muted);
+	}
+
+	.agent-dot {
+		flex: none;
+		width: var(--space-3xs);
+		height: var(--space-3xs);
+		border-radius: var(--radius-pill);
+		background: var(--color-rule-2);
+	}
+
+	.agent-dot.running {
+		background: var(--color-success);
+		animation: pulse-status 1.8s var(--ease-in-out) infinite;
+	}
+
+	.agent-overflow {
+		position: relative;
+		display: inline-flex;
+	}
+
+	.agent-more {
+		color: var(--color-muted);
+	}
+
+	.agent-menu {
+		position: absolute;
+		inset-block-start: calc(100% + var(--space-3xs));
+		inset-inline-start: 0;
+		z-index: var(--z-dropdown);
+		display: flex;
+		flex-direction: column;
+		min-width: 14rem;
+		max-height: min(16rem, 40dvh);
+		padding: var(--space-3xs);
+		overflow-y: auto;
+		border: var(--rule-hair) solid var(--color-rule-2);
+		border-radius: var(--radius-input);
+		background: var(--color-paper);
+		box-shadow: var(--shadow-float);
+	}
+
+	.agent-menu-item {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		gap: var(--space-2xs);
+		align-items: center;
+		padding: var(--space-2xs) var(--space-xs);
+		border: 0;
+		border-radius: var(--radius-input);
+		background: transparent;
+		color: var(--color-ink-2);
+		cursor: pointer;
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+		text-align: start;
+	}
+
+	.agent-menu-item:hover,
+	.agent-menu-item:focus-visible {
+		background: var(--color-paper-3);
+	}
+
+	.agent-menu-item.current {
+		color: var(--color-accent-active);
+		font-weight: 600;
+	}
+
+	.agent-menu-item.closed {
+		color: var(--color-muted);
+	}
+
+	.agent-menu-name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.agent-menu-role,
+	.agent-menu-state {
+		color: var(--color-muted);
+		font-weight: 400;
+	}
+
+	/* Read-only agent view: the composer yields to a quiet return strip. */
+	.agent-banner {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-2xs) var(--space-xs);
+		align-items: center;
+		padding: var(--space-xs) var(--space-sm) calc(var(--space-xs) + env(safe-area-inset-bottom));
+		border-block-start: var(--rule-hair) solid var(--color-rule);
+		background: var(--color-paper-2);
+		color: var(--color-neutral);
+		font-family: var(--font-outlier);
+		font-size: var(--text-xs);
+	}
+
+	.agent-banner-label {
+		display: inline-flex;
+		flex-wrap: wrap;
+		gap: var(--space-3xs);
+		align-items: baseline;
+		min-width: 0;
+		font-weight: 600;
+	}
+
+	/* Agent list inside the session-details dialog (the mobile path). */
+	.session-info-agents {
+		padding-block-start: var(--space-xs);
+	}
+
+	.session-info-agents h3 {
+		margin: 0 0 var(--space-2xs);
+		color: var(--color-muted);
+		font-family: var(--font-body);
+		font-size: var(--text-sm);
+		font-weight: 500;
+	}
+
+	.session-info-agent-list {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.session-info-agent {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		gap: var(--space-sm);
+		align-items: center;
+		min-height: var(--control-height);
+		padding: var(--space-2xs) var(--space-2xs);
+		border: 0;
+		border-block-end: var(--rule-hair) solid var(--color-rule);
+		border-radius: 0;
+		background: transparent;
+		color: var(--color-ink-2);
+		cursor: pointer;
+		font-family: var(--font-outlier);
+		font-size: var(--text-sm);
+		text-align: start;
+	}
+
+	.session-info-agent:last-child {
+		border-block-end: 0;
+	}
+
+	.session-info-agent:hover,
+	.session-info-agent:focus-visible {
+		background: var(--color-paper-3);
+	}
+
+	.session-info-agent.current {
+		color: var(--color-accent-active);
+		font-weight: 600;
+	}
+
+	.session-info-agent.closed {
+		color: var(--color-muted);
+	}
+
+	.session-info-agent-name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.session-info-agent-state {
 		color: var(--color-muted);
 	}
 

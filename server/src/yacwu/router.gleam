@@ -433,7 +433,7 @@ fn dispatch(
     ["api", "threads", "loaded"], Get -> loaded_threads(ctx)
     ["api", "threads", id], Get -> {
       use _, cx <- with_codex(ctx, req, Some(id))
-      read_thread(cx, id)
+      read_thread(cx, req, id)
     }
     ["api", "threads", id, "open"], Post -> {
       use host, cx <- with_codex(ctx, req, Some(id))
@@ -1399,14 +1399,20 @@ fn loaded_threads(ctx: Context) -> Response(ResponseData) {
   )
 }
 
-/// Read one thread's metadata without loading it or including turns.
-fn read_thread(cx: Codex, thread_id: String) -> Response(ResponseData) {
+/// Read one thread's metadata without loading it. `?turns=1` includes the
+/// full turn history — used for read-only sub-agent transcripts, which must
+/// never be resumed (their parent turn owns them).
+fn read_thread(
+  cx: Codex,
+  req: Request(Connection),
+  thread_id: String,
+) -> Response(ResponseData) {
   rpc(
     cx,
     "thread/read",
     json.object([
       #("threadId", json.string(thread_id)),
-      #("includeTurns", json.bool(False)),
+      #("includeTurns", json.bool(query_value(req, "turns") == "1")),
     ]),
   )
 }
