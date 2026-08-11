@@ -8,8 +8,9 @@
 ////
 //// Transports:
 ////
-//// - `Local`: a child `codex app-server` speaking newline-delimited JSON
-////   over stdio. Spawned lazily on the first request and respawned on the
+//// - `Local`: a child app-server speaking newline-delimited JSON over
+////   stdio — `codex app-server`, or an alternative backend command (see
+////   `backends`). Spawned lazily on the first request and respawned on the
 ////   next request after it exits — the original behaviour.
 //// - `UnixSock`: an already-running app-server listening on a Unix socket
 ////   (codex's WebSocket transport). The server outlives this manager.
@@ -88,10 +89,14 @@ fn binary_split(
 
 // -- Public API ---------------------------------------------------------------
 
+/// The default local app-server command.
+pub const default_command = ["codex", "app-server"]
+
 /// How to reach the app-server this manager drives.
 pub type Transport {
-  /// Child process over stdio (the classic local setup).
-  Local
+  /// Child process over stdio (the classic local setup): `default_command`,
+  /// or an alternative backend's argv.
+  Local(command: List(String))
   /// Persistent server on a local Unix socket (WebSocket framing).
   UnixSock(path: String)
   /// Persistent server on `host` from ~/.ssh/config, over a forwarded
@@ -528,8 +533,8 @@ fn request_thread_id(method: String, params: Json) -> Option(String) {
 
 fn begin_connect(state: State, queued: List(Queued)) -> actor.Next(State, Msg) {
   case state.transport {
-    Local -> {
-      let port = spawn_codex()
+    Local(command) -> {
+      let port = spawn_codex(command)
       actor.continue(begin_initialize(state, PortConn(port), queued))
     }
     UnixSock(_) | Ssh(_) -> {
@@ -569,13 +574,13 @@ fn begin_initialize(state: State, conn: Conn, queued: List(Queued)) -> State {
   )
 }
 
-fn spawn_codex() -> Port {
+fn spawn_codex(command: List(String)) -> Port {
   erl_open_port(SpawnExecutable("/usr/bin/env"), [
     Binary,
     ExitStatus,
     UseStdio,
     Hide,
-    Args(["codex", "app-server"]),
+    Args(command),
     Cd(default_cwd()),
   ])
 }
@@ -604,7 +609,7 @@ fn spawn_connector(state: State) -> Pid {
           use handover <- result.try(remote.attach(local, owner, 40))
           Ok(#(handover.socket, handover.leftover, Some(boot)))
         }
-        Local -> Error("local transport needs no connector")
+        Local(_) -> Error("local transport needs no connector")
       }
       process.send(subject, ConnResult(result))
     })
@@ -693,7 +698,7 @@ fn on_conn_result(
 
 fn schedule_reconnect(state: State) -> Nil {
   case state.transport, state.resumed {
-    Local, _ | _, [] -> Nil
+    Local(_), _ | _, [] -> Nil
     _, _ -> {
       // First retry after 1s, doubling to a 30s ceiling.
       let delay =
@@ -953,7 +958,7 @@ fn broadcast(state: State, line: BitArray) -> State {
 /// synthetic notification. Local child restarts stay silent, as before.
 fn broadcast_status(state: State, connection: String, error: String) -> State {
   case state.transport {
-    Local -> state
+    Local(_) -> state
     _ ->
       broadcast(
         state,

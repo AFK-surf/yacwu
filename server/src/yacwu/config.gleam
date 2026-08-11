@@ -33,6 +33,10 @@ Address:
 Environment:
   HOST, PORT          fallbacks for --host / --port
   YACWU_CWD           working directory for new Codex sessions
+  YACWU_BACKENDS      alternative local app-server commands, offered in the
+                      host picker alongside the default local codex:
+                      semicolon-separated name=command entries, e.g.
+                      \"claude=node /opt/claude-codex/dist/src/adapter.mjs\"
   YACWU_STATIC        directory holding the built web UI (default: ./build)
   YACWU_REMOTE_USERS  fallback for --remote-user
   YACWU_OAUTH_*       built-in OAuth/OIDC login: ISSUER (or AUTH_URL +

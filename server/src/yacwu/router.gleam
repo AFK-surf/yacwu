@@ -26,6 +26,7 @@ import gleam/uri
 import mist.{type Connection, type ResponseData}
 import simplifile
 import yacwu/auth
+import yacwu/backends
 import yacwu/codex.{type Codex}
 import yacwu/defaults
 import yacwu/files
@@ -552,12 +553,18 @@ fn with_codex(
   }
 }
 
-/// GET /api/hosts: local plus every concrete ~/.ssh/config alias, with the
-/// connection state of any manager already running. Never connects anything.
+/// GET /api/hosts: local, every configured backend, and every concrete
+/// ~/.ssh/config alias, with the connection state of any manager already
+/// running. Never connects anything.
 fn list_hosts(ctx: Context) -> Response(ResponseData) {
   let running = hosts.running(ctx.registry)
   let entries =
-    [hosts.local, ..ssh_config.discover()]
+    [
+      [hosts.local],
+      list.map(backends.discover(), fn(backend) { backend.name }),
+      ssh_config.discover(),
+    ]
+    |> list.flatten
     |> list.unique
     |> list.map(fn(host) {
       let #(state, error) = case list.key_find(running, host) {
@@ -569,12 +576,12 @@ fn list_hosts(ctx: Context) -> Response(ResponseData) {
       }
       json.object([
         #("name", json.string(host)),
-        #("kind", case host == hosts.local {
+        #("kind", case hosts.is_local(host) {
           True -> json.string("local")
           False -> json.string("remote")
         }),
-        #("state", case host == hosts.local {
-          // The local child is spawned on demand; it is never unreachable.
+        #("state", case hosts.is_local(host) {
+          // A local child is spawned on demand; it is never unreachable.
           True -> json.string("connected")
           False -> json.string(state)
         }),
@@ -783,7 +790,7 @@ fn serve_image(
 ) -> Response(ResponseData) {
   // The local fast path streams straight from disk; remote images arrive
   // through the link (size-capped) and are served buffered.
-  case host == hosts.local, include_body {
+  case hosts.is_local(host), include_body {
     True, True ->
       case simplifile.is_file(path) {
         Ok(True) ->
@@ -990,7 +997,7 @@ fn git_diff(
 /// The workspace a session's files live in: this machine, or the remote
 /// machine reached through the session's app-server.
 fn ws_for(host: String, cx: Codex) -> workspace.Workspace {
-  case host == hosts.local {
+  case hosts.is_local(host) {
     True -> workspace.LocalWorkspace
     False -> workspace.RemoteWorkspace(cx)
   }
@@ -999,7 +1006,7 @@ fn ws_for(host: String, cx: Codex) -> workspace.Workspace {
 /// The session's Git repository, executed locally or via the remote
 /// app-server's `command/exec`.
 fn repo_for(host: String, cx: Codex, root: String) -> git.Repo {
-  case host == hosts.local {
+  case hosts.is_local(host) {
     True -> git.local_repo(root)
     False ->
       git.Repo(
@@ -1022,7 +1029,7 @@ fn rollout_reader(
   host: String,
   cx: Codex,
 ) -> fn(String) -> Result(model_state.Persisted, Nil) {
-  case host == hosts.local {
+  case hosts.is_local(host) {
     True -> model_state.read_latest_turn_model
     False -> fn(path) {
       workspace.read_binary(workspace.RemoteWorkspace(cx), path, 4_000_000)
@@ -1037,7 +1044,7 @@ fn rollout_reader(
 
 /// The codex home holding a host's profile files.
 fn host_codex_home(host: String, cx: Codex) -> String {
-  case host == hosts.local {
+  case hosts.is_local(host) {
     True -> profiles.codex_home()
     False -> codex.info(cx).codex_home
   }
@@ -1046,7 +1053,7 @@ fn host_codex_home(host: String, cx: Codex) -> String {
 /// A host's available profiles ($CODEX_HOME/<name>.config.toml on the
 /// machine the session runs on).
 fn host_profiles(host: String, cx: Codex) -> List(profiles.Profile) {
-  case host == hosts.local {
+  case hosts.is_local(host) {
     True -> profiles.list_profiles()
     False -> {
       let home = host_codex_home(host, cx)
@@ -1310,7 +1317,7 @@ fn list_threads(
       case host_thread_list(ctx, host, cx) {
         Error(message) -> json_response(500, error_body(message))
         Ok(entries) -> {
-          let default_cwd = case host == hosts.local {
+          let default_cwd = case hosts.is_local(host) {
             True -> codex.default_cwd()
             False -> codex.info(cx).home
           }
@@ -1333,7 +1340,8 @@ fn list_threads(
       let connected =
         hosts.running(ctx.registry)
         |> list.filter(fn(manager) {
-          manager.0 == hosts.local || codex.info(manager.1).state == "connected"
+          hosts.is_local(manager.0)
+          || codex.info(manager.1).state == "connected"
         })
       let results =
         list.map(connected, fn(manager) {
@@ -1440,7 +1448,7 @@ fn create_thread_on(
   cx: Codex,
   body: Dynamic,
 ) -> Response(ResponseData) {
-  let local = host == hosts.local
+  let local = hosts.is_local(host)
   let params = defaults.thread_defaults()
   let params = case jsonx.field_string(body, ["model"]) {
     Ok(model) if model != "" -> [#("model", json.string(model)), ..params]
@@ -1611,7 +1619,7 @@ fn open_thread(
   // In-use detection: scan for *other* codex processes holding this
   // session's rollout open — on this machine for local sessions, over ssh
   // on the session's machine for remote ones.
-  let holders = case force, host == hosts.local {
+  let holders = case force, hosts.is_local(host) {
     True, _ -> []
     False, True ->
       session_lock.detect_external_holders(rollout_path, codex.os_pid(cx))
@@ -1831,7 +1839,7 @@ fn stage_image(host: String, cx: Codex, part: Part) -> Result(String, String) {
           bit_array.base16_encode(crypto.strong_random_bytes(16)),
         )
         <> image_extension(part.filename, content_type)
-      use dir <- result.try(case host == hosts.local {
+      use dir <- result.try(case hosts.is_local(host) {
         True -> Ok(envoy.get("TMPDIR") |> result.unwrap("/tmp"))
         False ->
           case codex.info(cx).home {

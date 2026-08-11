@@ -7,12 +7,14 @@ import envoy
 import gleam/erlang/process
 import gleam/int
 import gleam/io
+import gleam/list
 import gleam/option.{None, Some}
 import gleam/otp/static_supervisor as supervisor
 import gleam/result
 import gleam/string
 import mist
 import yacwu/auth
+import yacwu/backends
 import yacwu/config
 import yacwu/hosts
 import yacwu/model_state
@@ -141,6 +143,14 @@ authentication (e.g. bound to localhost only).",
     envoy.get("YACWU_CWD")
     |> result.unwrap("(home)")
   io.println("  working directory for new sessions: " <> cwd_note)
+  case backends.discover() {
+    [] -> Nil
+    configured ->
+      io.println(
+        "  alternative backends: "
+        <> string.join(list.map(configured, fn(b) { b.name }), ", "),
+      )
+  }
   case auth_config.oauth {
     Some(_) -> io.println("  OAuth login: enabled")
     None -> Nil

@@ -30,6 +30,9 @@ state lives entirely in Codex's own persistent sessions, read back via
   lazy unified diffs, and responsive file-to-diff navigation
 - 🎛️ Per-session codex profiles: pick a `$CODEX_HOME/<name>.config.toml` when
   creating a session (or with `/profile`)
+- 🔁 Alternative backends: `YACWU_BACKENDS` registers other local app-server
+  commands (e.g. [claude-codex](https://github.com/fuergaosi233/claude-codex))
+  that appear in the host picker alongside the default local codex
 - 🔌 One `codex app-server` connection per machine, multiplexed; events fan
   out to the browser via Server-Sent Events
 - 🌐 Remote machines over SSH: pick any concrete `Host` alias from
@@ -81,8 +84,8 @@ YACWU_INSECURE_SKIP_AUTH=1 bun run start   # serve UI + API on http://127.0.0.1:
 ```
 
 `bun run start` runs the Gleam server (`server/`), which serves the static UI
-build, the REST/SSE API, and spawns/manages the single `codex app-server`
-process. The server fails closed: it refuses to start unless authentication
+build, the REST/SSE API, and spawns/manages one `codex app-server` process
+(plus one per configured [alternative backend](#alternative-backends)). The server fails closed: it refuses to start unless authentication
 is configured (see [Authentication](#authentication)) or
 `YACWU_INSECURE_SKIP_AUTH=1` explicitly opts into running open, as above for
 a localhost-only setup. The listening address is configurable:
@@ -101,6 +104,28 @@ selects the working directory for new sessions; `YACWU_STATIC` points at the
 web UI build directory (default `./build`, relative to where the server runs —
 the `bun run` scripts set it for you). Set `YACWU_DEBUG=1` for a per-request
 timing log on stderr.
+
+### Alternative backends
+
+Anything that speaks the codex app-server protocol over stdio can stand in
+for `codex app-server` — for example
+[claude-codex](https://github.com/fuergaosi233/claude-codex), which serves
+the protocol backed by Claude Code. Declare such backends with
+`YACWU_BACKENDS`, semicolon-separated `name=command` entries:
+
+```bash
+YACWU_BACKENDS="claude=node /opt/claude-codex/dist/src/adapter.mjs" bun run start
+```
+
+Each name appears in the host picker alongside the default local codex
+(`local`) and the SSH remotes, and runs its command as a child process on
+this machine — same working directory, file browser, Git viewer, profiles and
+in-use detection as the default. Sessions started on a backend are listed and
+resumed through that backend, and merge into the session rail with everyone
+else's. The command is split on whitespace (no quoting) and resolved via
+`/usr/bin/env`, so bare program names use `PATH` and absolute paths work
+as-is. Names must be URL-safe (letters, digits, `.-_@`) and may not be
+`local`; a backend name shadows an identical `~/.ssh/config` alias.
 
 For a deployable artifact, `cd server && gleam export erlang-shipment`
 produces a self-contained BEAM release (needs only Erlang on the target), and
