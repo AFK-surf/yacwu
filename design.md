@@ -84,6 +84,14 @@ A four-point named scale lives in `tokens.css`. Components use named tokens; raw
 - The viewer is read-only. It may copy a patch or open the current file, but it does not stage, discard, commit, or edit changes.
 - Narrow viewports switch between the changed-file list and the selected diff using the same file-manager navigation as the file browser.
 
+## Agent transcripts
+
+- Sub-agent threads spawned by a session (multi-agent collaboration) are reachable from the session header: each agent renders as a quiet link-style button to the right of the working-directory path, in the mono technical register with a small status dot (rule-toned at rest, pulsing success-green while the agent runs, muted when closed).
+- At most five agents sit in the header row; further agents live behind a `+N more` menu that follows the slash-popup's dropdown surface (paper, hairline rule, float shadow). The selected agent always occupies a visible slot, swapping in from the overflow when needed.
+- The current agent is a current-location mark: coral ink with a coral underline, consistent with the app's quiet-link pattern. Idle agents are ink-2; closed agents are muted.
+- On narrow viewports the header meta row is hidden, so the agent list nests inside the Session details dialog as full-width rows sharing the dialog's ruled-list rhythm.
+- Selecting an agent shows that thread in the same transcript column, read-only. The composer yields to a paper-2 return strip naming the agent, its role, its state, and the way back; the session — not the agent — remains the URL's identity (`?agent=`), so the rail selection never moves and agent threads never appear in the session rail.
+
 ## Motion
 
 - Easings: `--ease-out`, `--ease-in`, and `--ease-in-out` from `tokens.css`.
