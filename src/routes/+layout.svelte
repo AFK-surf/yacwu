@@ -195,14 +195,19 @@
 	const viewedId = $derived(viewedAgentId ?? activeId);
 	const viewed = $derived(viewedId ? (threads[viewedId] ?? null) : null);
 	const viewedAgent = $derived(viewedAgentId ? (agents[viewedAgentId] ?? null) : null);
-	// The header shows at most 5 agents; the rest live behind a menu. A
-	// selected agent from the overflow swaps into the last visible slot so
-	// the current-location mark is always in view.
+	// The header shows at most 5 agents; the rest live behind a menu. Running
+	// agents take the visible slots first (spawn order within each group),
+	// and a selected agent from the overflow swaps into the last visible slot
+	// so the current-location mark is always in view.
 	const AGENT_ROW_MAX = 5;
 	const headerAgents = $derived.by(() => {
 		if (activeAgents.length <= AGENT_ROW_MAX) return { visible: activeAgents, overflow: [] };
-		const visible = activeAgents.slice(0, AGENT_ROW_MAX);
-		const overflow = activeAgents.slice(AGENT_ROW_MAX);
+		const ranked = [
+			...activeAgents.filter((agent) => agentIsRunning(agent)),
+			...activeAgents.filter((agent) => !agentIsRunning(agent))
+		];
+		const visible = ranked.slice(0, AGENT_ROW_MAX);
+		const overflow = ranked.slice(AGENT_ROW_MAX);
 		const selected = overflow.findIndex((agent) => agent.id === viewedAgentId);
 		if (selected >= 0) {
 			const swap = visible[AGENT_ROW_MAX - 1];
@@ -4203,9 +4208,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		color: var(--color-muted);
 	}
 
-	.topbar .cwd {
-		flex: 1 1 auto;
-	}
+	/* The cwd keeps its natural width so the agent row sits right beside it. */
 
 	.session-state {
 		display: flex;
