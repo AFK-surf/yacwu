@@ -76,6 +76,12 @@ fn erl_port_close(port: Port) -> Bool
 @external(erlang, "erlang", "port_info")
 fn erl_port_info(port: Port, item: atom.Atom) -> Dynamic
 
+@external(erlang, "erlang", "is_port")
+fn erl_is_port(value: a) -> Bool
+
+@external(erlang, "erlang", "=:=")
+fn erl_same_term(a: a, b: b) -> Bool
+
 type SplitOption {
   Global
 }
@@ -140,6 +146,7 @@ pub opaque type Msg {
   TcpData(BitArray)
   TcpClosed
   SubscriberDown(pid: Pid)
+  LinkedExit(exit: process.ExitMessage)
   Ignore
 }
 
@@ -226,9 +233,17 @@ pub fn start(
   transport: Transport,
 ) -> actor.StartResult(Subject(Msg)) {
   actor.new_with_initialiser(1000, fn(subject) {
+    // The child's port is linked to this actor, and a port can die
+    // abnormally out from under us — most notably with `epipe` when the
+    // app-server exits (say, after an internal error like a model-refresh
+    // timeout) while writes are still in flight. Untrapped, that exit
+    // signal kills the manager along with every pending request and the
+    // resumed-thread list; trapped, it is just a disconnect.
+    process.trap_exits(True)
     let selector =
       process.new_selector()
       |> process.select(subject)
+      |> process.select_trapped_exits(LinkedExit)
       |> process.select_monitors(fn(down) {
         case down {
           process.ProcessDown(pid: pid, ..) -> SubscriberDown(pid)
@@ -459,6 +474,7 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
         // that arrives separately as TcpClosed.
         _ -> actor.continue(State(..state, forwarder: None))
       }
+    LinkedExit(exit) -> on_linked_exit(state, exit)
     TcpData(data) -> on_tcp_data(state, data)
     TcpClosed ->
       case state.status {
@@ -1000,6 +1016,50 @@ fn on_child_exit(state: State, code: Int) -> actor.Next(State, Msg) {
   actor.continue(fail_all(state, "codex app-server exited"))
 }
 
+/// A trapped exit signal from something linked to this manager.
+///
+/// The child's port dying abnormally (`epipe` after the app-server exited
+/// under a write) is a recoverable disconnect: fail in-flight work and let
+/// the next request respawn. Other ports' exits are lifecycle noise handled
+/// through their own messages. A linked *process* exiting abnormally — the
+/// registry going down — keeps its pre-trapping meaning: this manager dies
+/// with it, and the link tears the child port down too.
+fn on_linked_exit(
+  state: State,
+  exit: process.ExitMessage,
+) -> actor.Next(State, Msg) {
+  let current_conn_port = case state.status {
+    Running(PortConn(port)) | Initializing(PortConn(port), _, _) ->
+      erl_same_term(exit.pid, port)
+    _ -> False
+  }
+  case current_conn_port, exit.reason {
+    True, _ -> {
+      io.println_error(
+        "[codex "
+        <> state.label
+        <> "] app-server connection failed: "
+        <> exit_reason_text(exit.reason),
+      )
+      actor.continue(fail_all(state, "codex app-server exited"))
+    }
+    False, process.Normal -> actor.continue(state)
+    False, _ ->
+      case erl_is_port(exit.pid) {
+        True -> actor.continue(state)
+        False -> actor.stop_abnormal(exit_reason_text(exit.reason))
+      }
+  }
+}
+
+fn exit_reason_text(reason: process.ExitReason) -> String {
+  case reason {
+    process.Normal -> "normal"
+    process.Killed -> "killed"
+    process.Abnormal(reason) -> string.inspect(reason)
+  }
+}
+
 /// The remote connection dropped: fail in-flight work, then reconnect with
 /// backoff. The remote server keeps running — and keeps executing any
 /// in-flight turns — so reconnecting re-attaches to live state.
@@ -1042,7 +1102,9 @@ fn fail_all(state: State, message: String) -> State {
 fn close_conn(conn: Conn) -> Nil {
   case conn {
     PortConn(port) -> {
-      let _ = erl_port_close(port)
+      // The port may already be gone (`port_close` on a closed port raises
+      // `badarg`); closing a dead connection is a no-op, not a crash.
+      let _ = exception.rescue(fn() { erl_port_close(port) })
       Nil
     }
     SockConn(socket) -> remote.close(socket)
@@ -1073,7 +1135,14 @@ fn write_line(conn: Conn, message: Json) -> Nil {
   let text = json.to_string(message)
   case conn {
     PortConn(port) -> {
-      let _ = erl_port_command(port, bit_array.from_string(text <> "\n"))
+      // The child can exit at any moment, and `port_command` on a closed
+      // port raises `badarg`. When that happens the port's exit is already
+      // in our mailbox, so the write is safely dropped here and the pending
+      // request fails cleanly when that message is processed.
+      let _ =
+        exception.rescue(fn() {
+          erl_port_command(port, bit_array.from_string(text <> "\n"))
+        })
       Nil
     }
     SockConn(socket) -> remote.send_text(socket, text)
