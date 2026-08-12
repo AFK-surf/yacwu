@@ -580,7 +580,10 @@ fn spawn_codex(command: List(String)) -> Port {
     ExitStatus,
     UseStdio,
     Hide,
-    Args(command),
+    // The AppImage bundles libraries on LD_LIBRARY_PATH for its own Erlang
+    // runtime; codex and other backends are system binaries and must not
+    // inherit that path.
+    Args(["-u", "LD_LIBRARY_PATH", ..command]),
     Cd(default_cwd()),
   ])
 }
