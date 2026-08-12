@@ -1947,11 +1947,18 @@ fn message(
       // only these two profile keys can apply at turn level — the full
       // profile config is layered on thread start/resume.)
       let params = case model_state.get_override(ctx.store, thread_id) {
-        Ok(settings) ->
-          list.append(params, [
-            #("model", json.string(settings.model)),
-            #("effort", json.string(settings.effort)),
-          ])
+        // Catalog-less backends can leave either field empty (see
+        // model_state); only pass along what was actually chosen.
+        Ok(settings) -> {
+          let params = case settings.model {
+            "" -> params
+            model -> list.append(params, [#("model", json.string(model))])
+          }
+          case settings.effort {
+            "" -> params
+            effort -> list.append(params, [#("effort", json.string(effort))])
+          }
+        }
         Error(_) ->
           case
             profiles.get_selection(ctx.profile_store, thread_id)
