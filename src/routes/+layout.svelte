@@ -32,7 +32,6 @@
 	import FileBrowser from '$lib/FileBrowser.svelte';
 	import GitDiffViewer from '$lib/GitDiffViewer.svelte';
 	import { parseCodexMarkdown, type MarkdownBlock, type MarkdownInline } from '$lib/markdown';
-	import { splitNotices, type NoticeLevel } from '$lib/notices';
 
 	let { children } = $props();
 
@@ -97,8 +96,7 @@
 
 	type RenderPart =
 		| { type: 'text'; text: string }
-		| { type: 'image'; path: string; source: 'local' | 'remote' }
-		| { type: 'notice'; level: NoticeLevel; text: string };
+		| { type: 'image'; path: string; source: 'local' | 'remote' };
 
 	let localCounter = 0;
 
@@ -1959,12 +1957,12 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		let last = 0;
 		let match: RegExpExecArray | null;
 		while ((match = re.exec(text))) {
-			if (match.index > last) parts.push(...splitNotices(text.slice(last, match.index)));
+			if (match.index > last) parts.push({ type: 'text', text: text.slice(last, match.index) });
 			const path = match[1]?.trim();
 			if (path) parts.push({ type: 'image', path, source: /^https?:\/\//i.test(path) ? 'remote' : 'local' });
 			last = re.lastIndex;
 		}
-		if (last < text.length) parts.push(...splitNotices(text.slice(last)));
+		if (last < text.length) parts.push({ type: 'text', text: text.slice(last) });
 		return parts;
 	}
 
@@ -3152,7 +3150,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 										{#each userParts(item) as part}
 											{#if part.type === 'text'}
 												<span>{part.text}</span>
-											{:else if part.type === 'image'}
+											{:else}
 												<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
 													<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
 													<span>{imageLabel(part.path)}</span>
@@ -3179,9 +3177,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 										{#each agentParts((item as any).text ?? '') as part}
 											{#if part.type === 'text'}
 												<div class="markdown-body">{@render markdownBlocks(parseCodexMarkdown(part.text))}</div>
-											{:else if part.type === 'notice'}
-												<div class="agent-notice {part.level}" role="note">{part.text}</div>
-											{:else if part.type === 'image'}
+											{:else}
 												<a class="message-image" href={imageSrc(part.path)} target="_blank" rel="noreferrer">
 													<img src={imageSrc(part.path)} alt={imageLabel(part.path)} loading="lazy" />
 													<span>{imageLabel(part.path)}</span>
@@ -5315,30 +5311,6 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	.item.subagent .gutter,
 	.item.collab .gutter {
 		color: var(--color-accent-active);
-	}
-
-	/* Backend notices ("[Claude warning] rate limit") lifted out of agent
-	   message text (see $lib/notices) render as compact tinted rows. */
-	.agent-notice {
-		display: block;
-		width: fit-content;
-		margin: var(--space-2xs) 0;
-		padding: var(--space-3xs) var(--space-xs);
-		border-radius: var(--radius-input);
-		font-family: var(--font-outlier);
-		font-size: var(--text-xs);
-		background: var(--color-warning-soft);
-		color: var(--color-warning);
-	}
-
-	.agent-notice.error {
-		background: var(--color-error-soft);
-		color: var(--color-error);
-	}
-
-	.agent-notice.event {
-		background: var(--color-paper-2);
-		color: var(--color-muted);
 	}
 
 	.item.file {
