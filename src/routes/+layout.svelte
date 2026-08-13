@@ -100,6 +100,11 @@
 
 	let localCounter = 0;
 
+	// Optimistic user messages awaiting the backend's own userMessage item.
+	// Codex echoes one per turn (we then drop ours); claude-codex-style
+	// backends never do, so the optimistic copy is what the user sees.
+	const pendingUserEchoes: Record<string, { id: string; text: string }[]> = {};
+
 	let sessions = $state<ThreadSummary[]>([]);
 	// Host picker: local plus the remote machines found in ~/.ssh/config.
 	let newHost = $state(LOCAL_HOST);
@@ -317,6 +322,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		const t = ensureThread(id);
 		t.order = [];
 		t.byId = {};
+		// Restored history carries the backend's own userMessage items;
+		// any optimistic copies were wiped with the transcript above.
+		pendingUserEchoes[id] = [];
 		for (const turn of turns) {
 			for (const item of turn.items ?? []) {
 				if ((item as any).id) upsertItem(id, item as any);
@@ -407,6 +415,44 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		persistFastSessions();
 	}
 
+	/** Optimistically append the just-sent user message to the transcript.
+	    Not every backend echoes a userMessage item back through the live
+	    stream (claude-codex keeps it on the turn record only), so the sent
+	    message would otherwise never appear until a reload. */
+	function addLocalUserMessage(id: string, text: string): string {
+		const shouldScroll = id === activeId && isTranscriptAtBottom();
+		const itemId = `local-user-${++localCounter}`;
+		upsertItem(
+			id,
+			{ type: 'userMessage', id: itemId, content: [{ type: 'text', text }] } as any,
+			true
+		);
+		(pendingUserEchoes[id] ??= []).push({ id: itemId, text });
+		if (shouldScroll) scrollToBottom();
+		return itemId;
+	}
+
+	function removeLocalItem(id: string, itemId: string) {
+		const t = threads[id];
+		if (t) {
+			delete t.byId[itemId];
+			t.order = t.order.filter((existing) => existing !== itemId);
+		}
+		const queue = pendingUserEchoes[id];
+		if (queue) pendingUserEchoes[id] = queue.filter((entry) => entry.id !== itemId);
+	}
+
+	/** A backend userMessage item supersedes a matching optimistic copy. */
+	function dropEchoedUserMessage(id: string, item: any) {
+		const queue = pendingUserEchoes[id];
+		if (!queue?.length) return;
+		const text = (item.content ?? [])
+			.map((c: any) => (typeof c?.text === 'string' ? c.text : ''))
+			.join('');
+		const match = queue.find((entry) => entry.text === text);
+		if (match) removeLocalItem(id, match.id);
+	}
+
 	/** Append a client-side note (slash-command echo / help / errors). */
 	function addLocalNote(id: string, text: string, tone: 'info' | 'err' = 'info') {
 		const shouldScroll = id === activeId && isTranscriptAtBottom();
@@ -487,7 +533,10 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			}
 			case 'item/started':
 			case 'item/completed': {
-				if (tid && p.item?.id) upsertItem(tid, p.item, true);
+				if (tid && p.item?.id) {
+					if (p.item.type === 'userMessage') dropEchoedUserMessage(tid, p.item);
+					upsertItem(tid, p.item, true);
+				}
 				// The file browser refreshes what it is showing when the agent
 				// touches files in the viewed session.
 				if (tid === activeId && p.item?.type === 'fileChange') filesRefresh += 1;
@@ -1168,6 +1217,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 		const t = ensureThread(id);
 		t.status = 'running';
 		sendingMessage = true;
+		const echoId = addLocalUserMessage(id, text);
 		try {
 			const res = await sendMessageWithRetries(id, text, images);
 
@@ -1181,6 +1231,7 @@ Do not modify files, source, git state, permissions, configuration, or any other
 			composerHistoryOf(id).record(text);
 		} catch (err) {
 			t.status = 'idle';
+			removeLocalItem(id, echoId);
 			addLocalNote(id, err instanceof Error ? err.message : 'failed to send message', 'err');
 		} finally {
 			sendingMessage = false;
@@ -1296,10 +1347,16 @@ Do not modify files, source, git state, permissions, configuration, or any other
 	}
 
 	function formatModelState(settings: ModelState): string {
-		const lines = [`model: ${settings.model}`, `effort: ${settings.effort}`, '', 'available models'];
-		for (const model of settings.models) {
-			const efforts = model.efforts.length > 0 ? model.efforts.join(', ') : model.defaultEffort;
-			lines.push(`  ${model.id.padEnd(24)} ${efforts}`);
+		const lines = [`model: ${settings.model || '(backend default)'}`];
+		if (settings.effort) lines.push(`effort: ${settings.effort}`);
+		if (settings.models.length > 0) {
+			lines.push('', 'available models');
+			for (const model of settings.models) {
+				const efforts = model.efforts.length > 0 ? model.efforts.join(', ') : model.defaultEffort;
+				lines.push(`  ${model.id.padEnd(24)} ${efforts}`);
+			}
+		} else {
+			lines.push('', 'this backend does not advertise a model catalog');
 		}
 		lines.push('', 'usage: /model <model> [effort]');
 		lines.push('       /model --effort <effort>');
@@ -1346,11 +1403,13 @@ Do not modify files, source, git state, permissions, configuration, or any other
 					const data = await res.json();
 					if (res.ok) {
 						const settings = data as ModelState;
-						sessionConfigs[id] = {
-							model: settings.model,
-							effort: settings.effort,
-							profile: sessionConfigs[id]?.profile ?? null
-						};
+						if (settings.model) {
+							sessionConfigs[id] = {
+								model: settings.model,
+								effort: settings.effort,
+								profile: sessionConfigs[id]?.profile ?? null
+							};
+						}
 						rememberEfforts(id, settings);
 					}
 					addLocalNote(
@@ -1371,7 +1430,9 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				});
 				addLocalNote(
 					id,
-					ok ? `model set: ${data.model} · effort ${data.effort}` : data.error ?? 'failed to change model settings',
+					ok
+						? `model set: ${data.model}${data.effort ? ` · effort ${data.effort}` : ''}`
+						: data.error ?? 'failed to change model settings',
 					ok ? 'info' : 'err'
 				);
 				if (ok) {
@@ -1554,9 +1615,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 				if (parsed.message) {
 					const t = ensureThread(sideId);
 					t.status = 'running';
+					const echoId = addLocalUserMessage(sideId, parsed.message);
 					const res = await sendMessageWithRetries(sideId, parsed.message, []);
 					if (!res.ok) {
 						t.status = 'idle';
+						removeLocalItem(sideId, echoId);
 						const err = await res.json().catch(() => ({}));
 						addLocalNote(sideId, err.error ?? 'failed to send message', 'err');
 					}
@@ -2829,8 +2892,11 @@ Do not modify files, source, git state, permissions, configuration, or any other
 						</span>
 					{/if}
 					{#if activeConfig?.model}
-						<span class="fact model" title={`Model ${activeConfig.model}, ${activeConfig.effort} reasoning`}>
-							{activeConfig.model}<span class="fact-detail">/{activeConfig.effort}</span>
+						<span
+							class="fact model"
+							title={`Model ${activeConfig.model}${activeConfig.effort ? `, ${activeConfig.effort} reasoning` : ''}`}
+						>
+							{activeConfig.model}{#if activeConfig.effort}<span class="fact-detail">/{activeConfig.effort}</span>{/if}
 						</span>
 					{/if}
 					{#if activeConfig?.profile}

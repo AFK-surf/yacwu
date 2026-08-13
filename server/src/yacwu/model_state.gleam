@@ -290,7 +290,14 @@ pub fn get_thread_model_state(
   profile profile: Persisted,
   read_rollout read_rollout: fn(String) -> Result(Persisted, Nil),
 ) -> Result(ModelState, String) {
-  use catalog <- result.try(list_model_choices(codex))
+  // Alternative backends may not implement `model/list` (claude-codex's
+  // throws, for one). /model still works without a catalog: the current
+  // settings resolve from override/rollout/profile/config, and set becomes
+  // pass-through (see below).
+  let catalog = case list_model_choices(codex) {
+    Ok(catalog) -> catalog
+    Error(_) -> Catalog(models: [], default_model: None)
+  }
   case get_override(store, thread_id) {
     Ok(settings) -> Ok(ModelState(settings, catalog.models))
     Error(_) -> {
@@ -319,22 +326,31 @@ pub fn get_thread_model_state(
       let model = case
         option.or(persisted.model, option.or(profile.model, config.model))
       {
-        Some(model) -> Ok(model)
-        None ->
-          option.to_result(catalog.default_model, "no models are available")
+        Some(model) -> Some(model)
+        None -> catalog.default_model
       }
-      use model <- result.try(model)
-      let choice = list.find(catalog.models, fn(c) { c.id == model })
-      let effort = case
-        option.or(persisted.effort, option.or(profile.effort, config.effort))
-      {
-        Some(effort) -> effort
-        None ->
-          choice
-          |> result.map(fn(c) { c.default_effort })
-          |> result.unwrap("medium")
+      case model {
+        // Nothing persisted, configured, or advertised: the backend picks
+        // its own model. Report empty settings rather than failing — the
+        // UI shows "backend default" and /model <model> still works.
+        None -> Ok(ModelState(Settings(model: "", effort: ""), catalog.models))
+        Some(model) -> {
+          let choice = list.find(catalog.models, fn(c) { c.id == model })
+          let effort = case
+            option.or(
+              persisted.effort,
+              option.or(profile.effort, config.effort),
+            )
+          {
+            Some(effort) -> effort
+            None ->
+              choice
+              |> result.map(fn(c) { c.default_effort })
+              |> result.unwrap("medium")
+          }
+          Ok(ModelState(Settings(model: model, effort: effort), catalog.models))
+        }
       }
-      Ok(ModelState(Settings(model: model, effort: effort), catalog.models))
     }
   }
 }
@@ -355,37 +371,62 @@ pub fn set_thread_model_state(
     profile: profile,
     read_rollout: read_rollout,
   ))
-  let model = option.unwrap(requested_model, current.settings.model)
-  use choice <- result.try(
-    list.find(current.models, fn(c) { c.id == model })
-    |> result.replace_error("unknown model: " <> model),
-  )
-  let effort = case requested_effort {
-    Some(effort) -> effort
-    None ->
-      case list.contains(choice.efforts, current.settings.effort) {
-        True -> current.settings.effort
-        False -> choice.default_effort
+  case current.models {
+    // Without a catalog (the backend lacks a working `model/list`) there is
+    // nothing to validate against: accept the requested values as-is and
+    // let the backend judge them on the next turn.
+    [] -> {
+      use model <- result.try(case requested_model {
+        Some(model) -> Ok(model)
+        None ->
+          case current.settings.model {
+            "" ->
+              Error(
+                "this backend does not advertise models; "
+                <> "name one: /model <model> [effort]",
+              )
+            model -> Ok(model)
+          }
+      })
+      let effort = option.unwrap(requested_effort, current.settings.effort)
+      let settings = Settings(model: model, effort: effort)
+      process.send(process.named_subject(store), Put(thread_id, settings))
+      Ok(ModelState(settings, []))
+    }
+    _ -> {
+      let model = option.unwrap(requested_model, current.settings.model)
+      use choice <- result.try(
+        list.find(current.models, fn(c) { c.id == model })
+        |> result.replace_error("unknown model: " <> model),
+      )
+      let effort = case requested_effort {
+        Some(effort) -> effort
+        None ->
+          case list.contains(choice.efforts, current.settings.effort) {
+            True -> current.settings.effort
+            False -> choice.default_effort
+          }
       }
+      use _ <- result.try(
+        case choice.efforts != [] && !list.contains(choice.efforts, effort) {
+          True ->
+            Error(
+              "unsupported effort for "
+              <> model
+              <> ": "
+              <> effort
+              <> " (choose "
+              <> string.join(choice.efforts, ", ")
+              <> ")",
+            )
+          False -> Ok(Nil)
+        },
+      )
+      let settings = Settings(model: model, effort: effort)
+      process.send(process.named_subject(store), Put(thread_id, settings))
+      Ok(ModelState(settings, current.models))
+    }
   }
-  use _ <- result.try(
-    case choice.efforts != [] && !list.contains(choice.efforts, effort) {
-      True ->
-        Error(
-          "unsupported effort for "
-          <> model
-          <> ": "
-          <> effort
-          <> " (choose "
-          <> string.join(choice.efforts, ", ")
-          <> ")",
-        )
-      False -> Ok(Nil)
-    },
-  )
-  let settings = Settings(model: model, effort: effort)
-  process.send(process.named_subject(store), Put(thread_id, settings))
-  Ok(ModelState(settings, current.models))
 }
 
 /// JSON body shared by the model GET/POST endpoints:
