@@ -43,7 +43,10 @@ import yacwu/jsonx
 import yacwu/remote
 import yacwu/ws
 
-const version = "0.1.0"
+// Version we report in the `initialize` handshake. We present ourselves as the
+// codex CLI rather than as a distinct client, so this tracks the latest codex
+// release (`@openai/codex` on npm) rather than yacwu's own version.
+const codex_version = "0.147.0"
 
 // -- Erlang port FFI ---------------------------------------------------------
 //
@@ -580,7 +583,7 @@ fn begin_initialize(state: State, conn: Conn, queued: List(Queued)) -> State {
         "clientInfo",
         json.object([
           #("name", json.string("codex_cli_rs")),
-          #("version", json.string(version)),
+          #("version", json.string(codex_version)),
         ]),
       ),
       #("capabilities", json.object([#("experimentalApi", json.bool(True))])),
