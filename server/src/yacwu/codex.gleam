@@ -572,11 +572,14 @@ fn begin_initialize(state: State, conn: Conn, queued: List(Queued)) -> State {
     init_id,
     "initialize",
     json.object([
+      // `clientInfo` is required by the handshake, so we cannot omit it, but we
+      // do not want a custom user agent: the app-server derives the string it
+      // presents upstream from these fields. Identify as the plain codex CLI
+      // instead of inventing a yacwu-specific originator.
       #(
         "clientInfo",
         json.object([
-          #("name", json.string("yacwu")),
-          #("title", json.string("yacwu")),
+          #("name", json.string("codex_cli_rs")),
           #("version", json.string(version)),
         ]),
       ),
